@@ -1,0 +1,65 @@
+<!-- Newsletter Brevo — Garten Gefühl -->
+<!-- Déclenchement : 60 secondes OU scroll jusqu'à fin d'article -->
+<div id="garten-newsletter-block" style="display:none; background:#f0f7e6; border:2px solid #5a8a3c; border-radius:12px; padding:30px; margin:40px 0; text-align:center; font-family:Georgia, serif;">
+  <h3 style="color:#3a6b1c; font-size:1.4em; margin-bottom:10px;">🌱 Gartenpost direkt in dein Postfach</h3>
+  <p style="color:#555; font-size:0.95em; margin-bottom:20px;">Erhalte wöchentliche Gartentipps, saisonale Pflanzideen und exklusive Inspirationen – kostenlos und jederzeit kündbar.</p>
+  <div class="sib-form" id="sib-form-container">
+    <div id="sib-container" style="max-width:480px; margin:0 auto;">
+      <form id="sib-form" method="POST" action="https://sibforms.com/serve/MUIFAHnhttps://app.brevo.com/lists" data-type="subscription">
+        <input type="email" id="EMAIL" name="EMAIL" placeholder="Deine E-Mail-Adresse" required
+          style="width:70%; padding:12px 15px; border:1px solid #ccc; border-radius:6px 0 0 6px; font-size:1em; outline:none;" />
+        <button type="submit"
+          style="width:28%; padding:12px 10px; background:#5a8a3c; color:#fff; border:none; border-radius:0 6px 6px 0; font-size:1em; cursor:pointer; font-weight:bold;">
+          Anmelden
+        </button>
+        <input type="hidden" name="locale" value="de" />
+        <input type="hidden" name="html_type" value="simple" />
+      </form>
+      <p style="font-size:0.75em; color:#888; margin-top:10px;">
+        🔒 Kein Spam. Datenschutz wird großgeschrieben. Abmeldung jederzeit möglich.
+      </p>
+    </div>
+  </div>
+</div>
+
+<script>
+(function() {
+  var block = document.getElementById('garten-newsletter-block');
+  if (!block) return;
+
+  var shown = false;
+
+  function showBlock() {
+    if (shown) return;
+    shown = true;
+    block.style.display = 'block';
+    block.style.animation = 'fadeIn 0.5s ease-in';
+  }
+
+  // Déclenchement 1 : après 60 secondes
+  var timer = setTimeout(showBlock, 60000);
+
+  // Déclenchement 2 : scroll jusqu'à fin d'article
+  function checkScroll() {
+    var scrollTop = window.pageYOffset || document.documentElement.scrollTop;
+    var windowHeight = window.innerHeight;
+    var docHeight = document.documentElement.scrollHeight;
+
+    if (scrollTop + windowHeight >= docHeight - 100) {
+      clearTimeout(timer);
+      showBlock();
+      window.removeEventListener('scroll', checkScroll);
+    }
+  }
+
+  window.addEventListener('scroll', checkScroll, { passive: true });
+})();
+</script>
+
+<style>
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(20px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+</style>
+<!-- Fin Newsletter Brevo -->
