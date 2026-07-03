@@ -2,7 +2,7 @@
 Directeur Artistique Agent — Image Sourcer
 Pexels → Pixabay → GPT-image-2 (fallback après 3 rejets)
 Validation visuelle via Codex CLI (-i flag).
-Vérification historique pour éviter les images dupliquées.
+Vérification historique global + intra-article pour éviter les doublons.
 Toutes les images converties en WebP et optimisées < 200KB.
 """
 
@@ -21,7 +21,6 @@ from config import (
     GPT_IMAGE_COUNTER_FILE, GPT_IMAGE_MODEL, GPT_IMAGE_SIZE
 )
 
-# Import historique
 sys.path.insert(0, "/root/garten-gefuehl-openclaw/agents")
 try:
     from history import is_image_already_used, add_image_to_history
@@ -35,6 +34,31 @@ try:
     PIL_AVAILABLE = True
 except ImportError:
     PIL_AVAILABLE = False
+
+
+# Set d'URLs utilisées dans l'article courant (réinitialisé à chaque run)
+_current_article_urls = set()
+
+
+def reset_article_url_cache():
+    """Réinitialise le cache intra-article au début de chaque article."""
+    global _current_article_urls
+    _current_article_urls = set()
+
+
+def is_url_used_in_current_article(url: str) -> bool:
+    """Vérifie si l'URL a déjà été utilisée dans l'article courant."""
+    url_key = url.split("/")[-1].split("?")[0]
+    for used in _current_article_urls:
+        used_key = used.split("/")[-1].split("?")[0]
+        if url_key == used_key:
+            return True
+    return False
+
+
+def mark_url_used_in_article(url: str):
+    """Marque l'URL comme utilisée dans l'article courant."""
+    _current_article_urls.add(url)
 
 
 def download_and_convert_webp(url: str, save_path: str, max_kb: int = 200) -> bool:
@@ -95,6 +119,8 @@ def validate_image_with_codex(image_path: str, keyword: str, category: str) -> b
     prompt = (
         f"Schau dir dieses Bild an. Ist es geeignet als Illustration für einen deutschen "
         f"Gartenblog-Artikel über '{keyword}' in der Kategorie '{category}'? "
+        f"Das Bild muss eindeutig Gartenpflanzen, Blumen oder Balkonbepflanzung zeigen. "
+        f"Gebäudefassaden, Architektur oder leere Balkone ohne Pflanzen sind NICHT geeignet. "
         f"Antworte NUR mit JA oder NEIN."
     )
 
@@ -112,7 +138,7 @@ def validate_image_with_codex(image_path: str, keyword: str, category: str) -> b
 
         if "NEIN" in output or "NO" in output:
             return False
-        return True  # JA ou ambigü → accepter
+        return True
 
     except subprocess.TimeoutExpired:
         print(f"[DA] Timeout — acceptée par défaut")
@@ -121,7 +147,7 @@ def validate_image_with_codex(image_path: str, keyword: str, category: str) -> b
         print(f"[DA] Erreur Codex: {e} — acceptée par défaut")
         return True
     finally:
-        if image_path.startswith("/tmp/") or "Temp" in image_path:
+        if image_path and (image_path.startswith("/tmp/") or "Temp" in image_path):
             try:
                 os.unlink(image_path)
             except:
@@ -222,16 +248,17 @@ def generate_gpt_image(prompt: str, save_path: str) -> bool:
 def fetch_image(query: str, save_path: str, keyword: str, category: str) -> dict:
     """
     Fetch une image avec :
-    1. Vérification historique (pas de doublon)
-    2. Validation visuelle Codex
-    3. Fallback GPT-image après 3 rejets
+    1. Vérification historique global (pas de doublon inter-articles)
+    2. Vérification intra-article (pas de doublon dans le même article)
+    3. Validation visuelle Codex (prompt strict)
+    4. Fallback GPT-image après 3 rejets
     """
     MAX_REJECTIONS = 3
     rejected_count = 0
 
     all_candidates = []
-    all_candidates.extend(search_pexels(query, per_page=6))
-    all_candidates.extend(search_pixabay(query, per_page=6))
+    all_candidates.extend(search_pexels(query, per_page=8))
+    all_candidates.extend(search_pixabay(query, per_page=8))
 
     print(f"[DA] {len(all_candidates)} candidats pour '{query}'")
 
@@ -241,14 +268,18 @@ def fetch_image(query: str, save_path: str, keyword: str, category: str) -> dict
 
         url = candidate["url"]
 
-        # Vérifier historique (doublon)
+        # 1. Vérifier doublon inter-articles
         if HISTORY_AVAILABLE and is_image_already_used(url):
-            print(f"[DA] ⏭️ Image déjà utilisée — ignorée")
+            print(f"[DA] ⏭️ Déjà utilisée (historique global) — ignorée")
+            continue
+
+        # 2. Vérifier doublon intra-article
+        if is_url_used_in_current_article(url):
+            print(f"[DA] ⏭️ Déjà utilisée dans cet article — ignorée")
             continue
 
         print(f"[DA] Candidat {i+1}/{len(all_candidates)} ({candidate['source']}) — validation...")
 
-        # Télécharger temporairement + validation Codex
         temp_path = download_temp_image(url)
         if not temp_path:
             continue
@@ -258,9 +289,10 @@ def fetch_image(query: str, save_path: str, keyword: str, category: str) -> dict
         if is_valid:
             print(f"[DA] ✅ Image validée ({candidate['source']})")
             if download_and_convert_webp(url, save_path):
-                # Ajouter à l'historique
+                # Marquer comme utilisée (global + intra-article)
                 if HISTORY_AVAILABLE:
                     add_image_to_history(url, keyword)
+                mark_url_used_in_article(url)
                 return {
                     "path": save_path,
                     "source": candidate["source"],
@@ -278,9 +310,11 @@ def fetch_image(query: str, save_path: str, keyword: str, category: str) -> dict
     gpt_prompt = (
         f"Professional garden photography for a German gardening blog. "
         f"Topic: '{keyword}'. Category: {category}. "
-        f"Beautiful, colorful, realistic. Natural light. No text. No watermarks."
+        f"Show beautiful flowering plants, colorful balcony garden scene. "
+        f"Natural light. No text. No watermarks. No buildings or architecture."
     )
     if generate_gpt_image(gpt_prompt, save_path):
+        mark_url_used_in_article(gpt_prompt[:50])
         return {
             "path": save_path, "source": "gpt_image",
             "photographer": "AI Generated", "source_url": "",
