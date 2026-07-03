@@ -1,7 +1,7 @@
 """
 Directeur Artistique Agent — Image Sourcer
 Pexels → Pixabay → GPT-image-2 (fallback après 3 rejets)
-Validation visuelle via Codex CLI (-i flag).
+Validation visuelle via Codex CLI (-i flag) avec prompt strict.
 Vérification historique global + intra-article pour éviter les doublons.
 Toutes les images converties en WebP et optimisées < 200KB.
 """
@@ -36,33 +36,28 @@ except ImportError:
     PIL_AVAILABLE = False
 
 
-# Set d'URLs utilisées dans l'article courant (réinitialisé à chaque run)
+# Cache intra-article (réinitialisé à chaque run)
 _current_article_urls = set()
 
 
 def reset_article_url_cache():
-    """Réinitialise le cache intra-article au début de chaque article."""
     global _current_article_urls
     _current_article_urls = set()
 
 
 def is_url_used_in_current_article(url: str) -> bool:
-    """Vérifie si l'URL a déjà été utilisée dans l'article courant."""
     url_key = url.split("/")[-1].split("?")[0]
     for used in _current_article_urls:
-        used_key = used.split("/")[-1].split("?")[0]
-        if url_key == used_key:
+        if url_key == used.split("/")[-1].split("?")[0]:
             return True
     return False
 
 
 def mark_url_used_in_article(url: str):
-    """Marque l'URL comme utilisée dans l'article courant."""
     _current_article_urls.add(url)
 
 
 def download_and_convert_webp(url: str, save_path: str, max_kb: int = 200) -> bool:
-    """Télécharge et convertit en WebP optimisé."""
     try:
         resp = requests.get(url, timeout=15, stream=True)
         if resp.status_code != 200:
@@ -99,7 +94,6 @@ def download_and_convert_webp(url: str, save_path: str, max_kb: int = 200) -> bo
 
 
 def download_temp_image(url: str) -> str:
-    """Télécharge temporairement pour validation Codex."""
     try:
         resp = requests.get(url, timeout=15)
         if resp.status_code != 200:
@@ -115,13 +109,25 @@ def download_temp_image(url: str) -> str:
 
 
 def validate_image_with_codex(image_path: str, keyword: str, category: str) -> bool:
-    """Valide visuellement une image via Codex CLI (-i flag)."""
+    """
+    Validation visuelle stricte via Codex CLI.
+    Critères clairs : plantes/fleurs en premier plan = JA, tout le reste = NEIN.
+    En cas de doute ou timeout → NEIN (refuser par sécurité).
+    """
     prompt = (
-        f"Schau dir dieses Bild an. Ist es geeignet als Illustration für einen deutschen "
-        f"Gartenblog-Artikel über '{keyword}' in der Kategorie '{category}'? "
-        f"Das Bild muss eindeutig Gartenpflanzen, Blumen oder Balkonbepflanzung zeigen. "
-        f"Gebäudefassaden, Architektur oder leere Balkone ohne Pflanzen sind NICHT geeignet. "
-        f"Antworte NUR mit JA oder NEIN."
+        f"Schau dir dieses Bild genau an.\n\n"
+        f"AKZEPTIERT (antworte JA) NUR wenn:\n"
+        f"- Das Bild zeigt eindeutig Blumen oder Pflanzen im Vordergrund\n"
+        f"- Balkonkasten mit blühenden Pflanzen sind sichtbar\n"
+        f"- Topfpflanzen oder Gartenblumen sind das Hauptmotiv\n\n"
+        f"ABGELEHNT (antworte NEIN) wenn:\n"
+        f"- Gebäude oder Häuserfassaden sichtbar sind (auch mit kleinen Balkonen)\n"
+        f"- Der Balkon leer oder fast leer ist\n"
+        f"- Architektur das Hauptmotiv ist\n"
+        f"- Pflanzen nur klein im Hintergrund sind\n"
+        f"- Stadtlandschaft oder Straßen sichtbar sind\n"
+        f"- Innenräume zu sehen sind\n\n"
+        f"Antworte NUR mit JA oder NEIN. Kein weiterer Text."
     )
 
     try:
@@ -136,16 +142,17 @@ def validate_image_with_codex(image_path: str, keyword: str, category: str) -> b
         output = result.stdout.strip().upper()
         print(f"[DA] Validation Codex : {output[:20]}")
 
-        if "NEIN" in output or "NO" in output:
-            return False
-        return True
+        # Strict : doit contenir explicitement JA
+        if "JA" in output and "NEIN" not in output:
+            return True
+        return False  # Tout ce qui n'est pas clairement JA = refusé
 
     except subprocess.TimeoutExpired:
-        print(f"[DA] Timeout — acceptée par défaut")
-        return True
+        print(f"[DA] Timeout — refusée par sécurité")
+        return False
     except Exception as e:
-        print(f"[DA] Erreur Codex: {e} — acceptée par défaut")
-        return True
+        print(f"[DA] Erreur Codex: {e} — refusée par sécurité")
+        return False
     finally:
         if image_path and (image_path.startswith("/tmp/") or "Temp" in image_path):
             try:
@@ -154,8 +161,7 @@ def validate_image_with_codex(image_path: str, keyword: str, category: str) -> b
                 pass
 
 
-def search_pexels(query: str, per_page: int = 8) -> list:
-    """Cherche des images sur Pexels."""
+def search_pexels(query: str, per_page: int = 10) -> list:
     api_key = os.getenv("PEXELS_API_KEY")
     if not api_key:
         return []
@@ -179,8 +185,7 @@ def search_pexels(query: str, per_page: int = 8) -> list:
     return []
 
 
-def search_pixabay(query: str, per_page: int = 8) -> list:
-    """Cherche des images sur Pixabay (sans IA)."""
+def search_pixabay(query: str, per_page: int = 10) -> list:
     api_key = os.getenv("PIXABAY_API_KEY")
     if not api_key:
         return []
@@ -228,7 +233,6 @@ def increment_gpt_image_count():
 
 
 def generate_gpt_image(prompt: str, save_path: str) -> bool:
-    """Génère une image via GPT-image-2 (fallback)."""
     try:
         from openai import OpenAI
         client = OpenAI()
@@ -247,18 +251,15 @@ def generate_gpt_image(prompt: str, save_path: str) -> bool:
 
 def fetch_image(query: str, save_path: str, keyword: str, category: str) -> dict:
     """
-    Fetch une image avec :
-    1. Vérification historique global (pas de doublon inter-articles)
-    2. Vérification intra-article (pas de doublon dans le même article)
-    3. Validation visuelle Codex (prompt strict)
-    4. Fallback GPT-image après 3 rejets
+    Fetch une image avec validation stricte.
+    Pexels → Pixabay → GPT-image-2 après 3 rejets.
     """
     MAX_REJECTIONS = 3
     rejected_count = 0
 
     all_candidates = []
-    all_candidates.extend(search_pexels(query, per_page=8))
-    all_candidates.extend(search_pixabay(query, per_page=8))
+    all_candidates.extend(search_pexels(query, per_page=10))
+    all_candidates.extend(search_pixabay(query, per_page=10))
 
     print(f"[DA] {len(all_candidates)} candidats pour '{query}'")
 
@@ -268,14 +269,12 @@ def fetch_image(query: str, save_path: str, keyword: str, category: str) -> dict
 
         url = candidate["url"]
 
-        # 1. Vérifier doublon inter-articles
         if HISTORY_AVAILABLE and is_image_already_used(url):
-            print(f"[DA] ⏭️ Déjà utilisée (historique global) — ignorée")
+            print(f"[DA] ⏭️ Déjà utilisée (historique global)")
             continue
 
-        # 2. Vérifier doublon intra-article
         if is_url_used_in_current_article(url):
-            print(f"[DA] ⏭️ Déjà utilisée dans cet article — ignorée")
+            print(f"[DA] ⏭️ Déjà utilisée dans cet article")
             continue
 
         print(f"[DA] Candidat {i+1}/{len(all_candidates)} ({candidate['source']}) — validation...")
@@ -289,7 +288,6 @@ def fetch_image(query: str, save_path: str, keyword: str, category: str) -> dict
         if is_valid:
             print(f"[DA] ✅ Image validée ({candidate['source']})")
             if download_and_convert_webp(url, save_path):
-                # Marquer comme utilisée (global + intra-article)
                 if HISTORY_AVAILABLE:
                     add_image_to_history(url, keyword)
                 mark_url_used_in_article(url)
@@ -308,10 +306,9 @@ def fetch_image(query: str, save_path: str, keyword: str, category: str) -> dict
     # Fallback GPT-image-2
     print(f"[DA] 🔄 Fallback GPT-image-2")
     gpt_prompt = (
-        f"Professional garden photography for a German gardening blog. "
-        f"Topic: '{keyword}'. Category: {category}. "
-        f"Show beautiful flowering plants, colorful balcony garden scene. "
-        f"Natural light. No text. No watermarks. No buildings or architecture."
+        f"Close-up professional photo of colorful flowering plants in a balcony box. "
+        f"Topic: {keyword}. Bright colors, sharp focus on flowers. "
+        f"No buildings, no architecture. Natural light. No text."
     )
     if generate_gpt_image(gpt_prompt, save_path):
         mark_url_used_in_article(gpt_prompt[:50])
