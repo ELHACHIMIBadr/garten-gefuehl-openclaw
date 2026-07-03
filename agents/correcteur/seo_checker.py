@@ -14,6 +14,13 @@ from config import (
 )
 
 
+def normalize_umlauts(text: str) -> str:
+    """Normalise les umlauts allemands pour comparaison avec les slugs."""
+    return (text.lower()
+        .replace("ä", "ae").replace("ö", "oe").replace("ü", "ue")
+        .replace("ß", "ss").replace(" ", "-"))
+
+
 def strip_html(html: str) -> str:
     """Supprime les balises HTML."""
     text = re.sub(r"<[^>]+>", " ", html)
@@ -44,11 +51,8 @@ def calculate_keyword_density(html: str, keyword: str) -> float:
 
 def check_all_seo_rules(article: dict, brief: dict) -> Dict[str, list]:
     """
-    Vérifie les 20 règles SEO Rank Math.
-    Retourne un dict avec :
-    - "errors" : règles non respectées (bloquantes)
-    - "warnings" : règles à améliorer (non bloquantes)
-    - "passed" : règles OK
+    Vérifie les 25 règles SEO.
+    Retourne un dict avec errors, warnings, passed.
     """
     keyword = brief["keyword_principal"]
     keyword_lower = keyword.lower()
@@ -83,13 +87,19 @@ def check_all_seo_rules(article: dict, brief: dict) -> Dict[str, list]:
     else:
         errors.append(f"❌ Keyword '{keyword}' absent de la meta description")
 
-    # 3. Keyword dans le slug
-    keyword_slug = keyword_lower.replace(" ", "-")
-    keyword_words_in_slug = all(w in slug for w in keyword_lower.split())
-    if keyword_words_in_slug:
+    # 3. Keyword dans le slug (avec normalisation umlauts)
+    keyword_normalized = normalize_umlauts(keyword)
+    slug_normalized = slug.lower()
+    if keyword_normalized in slug_normalized:
         passed.append("✅ Keyword dans le slug")
     else:
-        errors.append(f"❌ Keyword '{keyword}' absent du slug")
+        # Vérification mot par mot
+        keyword_words = keyword_lower.split()
+        keyword_words_normalized = [normalize_umlauts(w) for w in keyword_words]
+        if all(w in slug_normalized for w in keyword_words_normalized):
+            passed.append("✅ Keyword dans le slug (mots normalisés)")
+        else:
+            errors.append(f"❌ Keyword '{keyword}' absent du slug (slug: {slug})")
 
     # 4. Keyword dans les premiers 10% du contenu
     total_chars = len(text_content)
@@ -136,7 +146,6 @@ def check_all_seo_rules(article: dict, brief: dict) -> Dict[str, list]:
         passed.append(f"✅ Densité keyword optimale ({density}%)")
     elif density > KEYWORD_DENSITY_MAX:
         warnings.append(f"⚠️ Densité keyword trop élevée ({density}%, max {KEYWORD_DENSITY_MAX}%)")
-    # (densité trop faible déjà gérée en règle 5)
 
     # 10. URL < 75 caractères
     if len(slug) <= SLUG_MAX_CHARS:
@@ -155,11 +164,11 @@ def check_all_seo_rules(article: dict, brief: dict) -> Dict[str, list]:
     internal_links = re.findall(r'href=["\'][^"\']*xn--garten-gefhl[^"\']*["\']', html_content)
     internal_placeholders = re.findall(r'\[INTERNER LINK', html_content)
     if internal_links or internal_placeholders:
-        passed.append(f"✅ Liens internes présents")
+        passed.append("✅ Liens internes présents")
     else:
         warnings.append("⚠️ Aucun lien interne trouvé")
 
-    # 13. Keyword pas encore utilisé (vérifié par le Scout — on note juste)
+    # 13. Unicité keyword
     passed.append("✅ Unicité keyword (validée par le Scout)")
 
     # ============================================================
@@ -218,12 +227,11 @@ def check_all_seo_rules(article: dict, brief: dict) -> Dict[str, list]:
     # RÈGLES SPÉCIFIQUES GARTEN GEFÜHL
     # ============================================================
 
-    # 20. RÈGLE CRITIQUE : pas de ponctuation collée après keyword dans le titre
+    # 20. Règle critique : pas de ponctuation collée après keyword
     for pattern in TITLE_FORBIDDEN_PATTERNS:
         if (keyword_lower + pattern) in title_lower:
             errors.append(
-                f"❌ RÈGLE CRITIQUE : keyword suivi directement de '{pattern}' dans le titre "
-                f"→ utiliser ' –' à la place"
+                f"❌ RÈGLE CRITIQUE : keyword suivi de '{pattern}' dans le titre → utiliser ' –'"
             )
 
     # 21. Longueur du titre
@@ -277,9 +285,7 @@ def check_all_seo_rules(article: dict, brief: dict) -> Dict[str, list]:
 
 
 def check_ai_detection(html_content: str) -> List[str]:
-    """
-    Détecte les phrases typiques de rédaction IA.
-    """
+    """Détecte les phrases typiques de rédaction IA."""
     issues = []
     content_lower = html_content.lower()
 
@@ -291,20 +297,15 @@ def check_ai_detection(html_content: str) -> List[str]:
 
 
 def check_german_quality(html_content: str) -> List[str]:
-    """
-    Vérifications basiques de qualité allemande.
-    """
+    """Vérifications basiques de qualité allemande."""
     issues = []
     text = strip_html(html_content)
 
-    # Vérifier majuscules des noms (en allemand tous les noms prennent une majuscule)
-    # Vérifier présence d'umlauts (texte allemand doit contenir ä, ö, ü)
     umlauts = ["ä", "ö", "ü", "Ä", "Ö", "Ü", "ß"]
     has_umlauts = any(u in text for u in umlauts)
     if not has_umlauts:
         issues.append("⚠️ Texte sans umlauts — peut-être pas en allemand natif")
 
-    # Vérifier longueur moyenne des phrases (trop longues = style IA)
     sentences = re.split(r"[.!?]", text)
     sentences = [s.strip() for s in sentences if len(s.strip()) > 10]
     if sentences:
