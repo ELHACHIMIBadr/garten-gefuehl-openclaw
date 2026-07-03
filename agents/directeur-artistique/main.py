@@ -14,13 +14,13 @@ from dotenv import load_dotenv
 load_dotenv("/root/garten-gefuehl-openclaw/config/.env")
 
 from config import ARTICLES_DIR, IMAGES_DIR, PINS_DIR, CATEGORY_IMAGE_KEYWORDS
-from image_sourcer import fetch_image, reset_article_url_cache
+from image_sourcer import fetch_n_images, reset_article_cache
 from pin_creator import create_all_pins
 
 import sys
 sys.path.insert(0, "/root/garten-gefuehl-openclaw/agents")
 try:
-    from history import add_image_to_history, load_image_history, save_image_history
+    from history import load_image_history, save_image_history
     HISTORY_AVAILABLE = True
 except ImportError:
     HISTORY_AVAILABLE = False
@@ -66,11 +66,6 @@ def seed_image_history_from_wordpress():
         print(f"[DA] ⚠️ Sync WP: {e}")
 
 
-def get_image_queries(brief: dict, article: dict) -> list:
-    category = brief.get("categorie_wp", "Garten Gefühl")
-    return CATEGORY_IMAGE_KEYWORDS.get(category, ["garden"])[:4]
-
-
 def upload_to_wordpress_media(image_path: str, alt_text: str, keyword: str) -> dict:
     wp_url = os.getenv("WP_URL", "https://xn--garten-gefhl-mlb.de")
     wp_user = os.getenv("WP_USER")
@@ -80,112 +75,113 @@ def upload_to_wordpress_media(image_path: str, alt_text: str, keyword: str) -> d
     try:
         with open(image_path, "rb") as f:
             image_data = f.read()
-        filename = Path(image_path).name
         resp = requests.post(
             f"{wp_url}/wp-json/wp/v2/media",
-            headers={"Content-Disposition": f'attachment; filename="{filename}"', "Content-Type": "image/webp"},
+            headers={"Content-Disposition": f'attachment; filename="{Path(image_path).name}"',
+                     "Content-Type": "image/webp"},
             auth=(wp_user, wp_password), data=image_data, timeout=30
         )
         if resp.status_code in (200, 201):
             media = resp.json()
-            media_id = media.get("id")
-            requests.post(f"{wp_url}/wp-json/wp/v2/media/{media_id}", auth=(wp_user, wp_password),
-                         json={"alt_text": alt_text, "caption": f"Foto: {keyword}"}, timeout=10)
-            print(f"[DA] Uploadée: ID {media_id}")
-            return {"id": media_id, "url": media.get("source_url", ""), "alt_text": alt_text}
+            mid = media.get("id")
+            requests.post(f"{wp_url}/wp-json/wp/v2/media/{mid}", auth=(wp_user, wp_password),
+                         json={"alt_text": alt_text}, timeout=10)
+            print(f"[DA] Uploadée: ID {mid}")
+            return {"id": mid, "url": media.get("source_url", ""), "alt_text": alt_text}
         print(f"[DA] Erreur upload: {resp.status_code}")
-        return {}
     except Exception as e:
         print(f"[DA] Erreur upload: {e}")
-        return {}
+    return {}
 
 
 def inject_images_in_html(html_content: str, images: list) -> str:
     """
-    Injecte les images de façon espacée dans le HTML.
-    Règles :
-    - Skip les 1000 premiers chars (intro + table des matières)
-    - Distance minimum 500 chars entre deux images
-    - Espacement régulier basé sur le nombre de </p> disponibles
+    Injection simple et robuste :
+    Divise le texte en N+1 segments égaux (par caractères).
+    Insère chaque image au point </p> le plus proche du point de découpe.
     """
     if not images:
         return html_content
 
-    p_positions = [m.end() for m in re.finditer(r"</p>", html_content, re.IGNORECASE)]
-    # Filtrer les positions après les 1000 premiers chars
-    valid_positions = [p for p in p_positions if p >= 1000]
+    n = len(images)
+    total_len = len(html_content)
+    segment_len = total_len // (n + 1)
 
-    if not valid_positions:
+    # Trouver toutes les positions </p>
+    p_positions = [m.end() for m in re.finditer(r"</p>", html_content, re.IGNORECASE)]
+    # Filtrer : skip les 800 premiers chars (intro + TOC)
+    p_positions = [p for p in p_positions if p > 800]
+
+    if not p_positions:
         return html_content
 
+    # Pour chaque image, trouver le </p> le plus proche du point de découpe
+    inject_points = []
+    used_p_indices = set()
+
+    for k in range(1, n + 1):
+        target = k * segment_len
+        # Trouver le </p> le plus proche
+        best_idx = None
+        best_dist = float('inf')
+        for j, p in enumerate(p_positions):
+            if j in used_p_indices:
+                continue
+            dist = abs(p - target)
+            if dist < best_dist:
+                best_dist = dist
+                best_idx = j
+        if best_idx is not None:
+            inject_points.append(p_positions[best_idx])
+            used_p_indices.add(best_idx)
+
+    # Trier les points d'injection
+    inject_points.sort()
+
+    # Insérer les images (en ordre inverse pour ne pas décaler les positions)
     result = html_content
-    offset = 0
-    image_index = 0
-    last_inject_pos = 0
-
-    # Diviser les positions disponibles en N+1 segments égaux
-    n_images = len(images)
-    segment_size = len(valid_positions) // (n_images + 1)
-    if segment_size == 0:
-        segment_size = 1
-
-    # Choisir une position par segment
-    inject_positions = []
-    for k in range(1, n_images + 1):
-        idx = min(k * segment_size, len(valid_positions) - 1)
-        pos = valid_positions[idx]
-        # Vérifier distance minimum
-        if not inject_positions or pos - inject_positions[-1] >= 500:
-            inject_positions.append(pos)
-
-    for pos in inject_positions:
-        if image_index >= len(images):
-            break
-
-        img = images[image_index]
+    for i in range(len(inject_points) - 1, -1, -1):
+        if i >= len(images):
+            continue
+        img = images[i]
         img_html = (
-            f'\n<figure class="wp-block-image size-large" style="margin:25px 0;">'
+            f'\n<figure class="wp-block-image size-large" style="margin:30px 0;">'
             f'<img src="{img.get("url", img.get("path", ""))}" '
             f'alt="{img.get("alt_text", "")}" loading="lazy" /></figure>\n'
         )
+        result = result[:inject_points[i]] + img_html + result[inject_points[i]:]
 
-        inject_pos = pos + offset
-        result = result[:inject_pos] + img_html + result[inject_pos:]
-        offset += len(img_html)
-        image_index += 1
-
-    print(f"[DA] {image_index} images injectées")
+    print(f"[DA] {min(len(inject_points), len(images))} images injectées (espacées)")
     return result
 
 
-def save_article(filepath: Path, data: dict, dry_run: bool = False):
+def save_article(filepath, data, dry_run=False):
     if not dry_run:
         with open(filepath, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
-        print(f"[DA] Article mis à jour : {filepath}")
+        print(f"[DA] Article mis à jour: {filepath}")
 
 
-def send_telegram(message: str):
+def send_telegram(msg):
     token = os.getenv("TELEGRAM_BOT_TOKEN")
-    chat_id = os.getenv("TELEGRAM_CHAT_ID")
-    if token and chat_id:
+    cid = os.getenv("TELEGRAM_CHAT_ID")
+    if token and cid:
         try:
             requests.post(f"https://api.telegram.org/bot{token}/sendMessage",
-                         json={"chat_id": chat_id, "text": message, "parse_mode": "HTML"}, timeout=10)
+                         json={"chat_id": cid, "text": msg, "parse_mode": "HTML"}, timeout=10)
         except:
             pass
 
 
-def run(article_path: str = None, dry_run: bool = False):
+def run(article_path=None, dry_run=False):
     print("=" * 60)
     print(f"[DA] Démarrage — {datetime.now().isoformat()}")
     print("=" * 60)
 
     try:
-        reset_article_url_cache()
+        reset_article_cache()
 
         if not dry_run:
-            print(f"[DA] Sync historique WP...")
             seed_image_history_from_wordpress()
 
         if article_path:
@@ -199,30 +195,27 @@ def run(article_path: str = None, dry_run: bool = False):
         brief = data["brief"]
         keyword = brief["keyword_principal"]
         category = brief["categorie_wp"]
-
-        print(f"[DA] Keyword : {keyword} | Catégorie : {category}")
+        print(f"[DA] Keyword: {keyword} | Catégorie: {category}")
 
         today = date.today().isoformat()
-        img_dir = Path(IMAGES_DIR) / today
-        pins_dir = Path(PINS_DIR) / today
+        img_dir = str(Path(IMAGES_DIR) / today)
+        pins_dir = str(Path(PINS_DIR) / today)
         os.makedirs(img_dir, exist_ok=True)
         os.makedirs(pins_dir, exist_ok=True)
 
-        # ÉTAPE 2 — Sourcing images
-        print(f"\n[DA] ÉTAPE 2 — Sourcing images...")
-        queries = get_image_queries(brief, article)
-        images_data = []
+        # ÉTAPE 2 — Sourcing images (N images uniques)
+        queries = CATEGORY_IMAGE_KEYWORDS.get(category, ["garden"])[:4]
+        n_images = 4
 
-        for i, query in enumerate(queries):
-            img_path = str(img_dir / f"article_img_{i+1:02d}.webp")
-            alt_text = keyword if i == 0 else f"{keyword} - {query}"
-            print(f"\n[DA] Image {i+1}/{len(queries)} : '{query}'")
-            result = fetch_image(query=query, save_path=img_path, keyword=keyword, category=category)
-            if result:
-                result["alt_text"] = alt_text
-                images_data.append(result)
+        if dry_run:
+            images_data = [{"path": f"DRY_{i}", "source": "dry", "alt_text": keyword,
+                           "source_id": f"dry_{i}"} for i in range(n_images)]
+            print(f"[DA] DRY RUN — {n_images} images simulées")
+        else:
+            print(f"\n[DA] ÉTAPE 2 — Sourcing {n_images} images uniques...")
+            images_data = fetch_n_images(queries, n_images, img_dir, keyword, category)
 
-        print(f"\n[DA] {len(images_data)}/{len(queries)} images sourcées")
+        print(f"[DA] {len(images_data)} images uniques trouvées")
 
         # ÉTAPE 3 — Upload WordPress
         print(f"\n[DA] ÉTAPE 3 — Upload WordPress...")
@@ -231,17 +224,15 @@ def run(article_path: str = None, dry_run: bool = False):
 
         for i, img in enumerate(images_data):
             if dry_run:
-                wp_images.append({"id": 999+i, "url": img["path"], "alt_text": img["alt_text"], "source": img.get("source")})
-                print(f"[DA] DRY RUN: {img['path']}")
+                wp_images.append({"id": 999+i, "url": img["path"], "alt_text": img["alt_text"]})
             else:
                 wp_result = upload_to_wordpress_media(img["path"], img["alt_text"], keyword)
                 if wp_result:
-                    wp_result["source"] = img.get("source", "unknown")
                     wp_images.append(wp_result)
                     if i == 0:
                         featured_image_id = wp_result.get("id")
 
-        # ÉTAPE 4 — Injection images
+        # ÉTAPE 4 — Injection images espacées
         print(f"\n[DA] ÉTAPE 4 — Injection images...")
         article["html_content"] = inject_images_in_html(article["html_content"], wp_images)
         article["featured_image_id"] = featured_image_id
@@ -249,31 +240,28 @@ def run(article_path: str = None, dry_run: bool = False):
 
         # ÉTAPE 5 — Pins Pinterest
         print(f"\n[DA] ÉTAPE 5 — Pins Pinterest...")
-        base_image = images_data[0]["path"] if images_data else None
+        base_image = images_data[0]["path"] if images_data and not dry_run else None
         pins = []
-
-        if base_image and not dry_run:
-            pins = create_all_pins(base_image_path=base_image, article_title=article["seo_title"],
-                                   keyword=keyword, category=category, pins_dir=str(pins_dir))
+        if base_image:
+            pins = create_all_pins(base_image, article["seo_title"], keyword, category, pins_dir)
         else:
-            pins = [{"account": acc, "title": article["seo_title"], "path": "DRY_RUN"}
-                    for acc in ["Blumenliebe DE", "Balkon Ideen DE", "Rosenfreude DE", "Terrasse & Garten DE", "Garten Gefühl"]]
-            if dry_run:
-                print("[DA] DRY RUN — 5 pins simulés")
+            pins = [{"account": a, "title": article["seo_title"], "path": "DRY"}
+                    for a in ["Blumenliebe DE", "Balkon Ideen DE", "Rosenfreude DE",
+                              "Terrasse & Garten DE", "Garten Gefühl"]]
 
         data["article"] = article
         data["pins"] = pins
         data["status"] = "ready_to_publish"
         save_article(filepath, data, dry_run)
 
-        print(f"\n[DA] ✅ Terminé — Images: {len(wp_images)} | Pins: {len(pins)}/5 | Featured: {featured_image_id}")
+        print(f"\n[DA] ✅ Images: {len(wp_images)} | Pins: {len(pins)}/5 | Featured: {featured_image_id}")
 
         if not dry_run:
-            send_telegram(f"🎨 <b>DA</b> — {keyword}\n🖼️ {len(wp_images)} images | 📌 {len(pins)}/5 pins")
+            send_telegram(f"🎨 <b>DA</b> — {keyword}\n🖼️ {len(wp_images)} | 📌 {len(pins)}/5")
 
     except Exception as e:
         print(f"[DA] ❌ {str(e)}")
-        send_telegram(f"❌ <b>DA Erreur</b>\n{str(e)}")
+        send_telegram(f"❌ <b>DA</b>\n{str(e)}")
         raise
 
 

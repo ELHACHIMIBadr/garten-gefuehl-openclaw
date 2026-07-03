@@ -1,13 +1,12 @@
 """
 Directeur Artistique Agent — Image Sourcer
-Fix: hash MD5 marqué IMMÉDIATEMENT pour éviter doublons inter-requêtes.
+Anti-doublon par ID source (pexels_id / pixabay_id).
 """
 
 import os
 import io
 import json
 import sys
-import hashlib
 import subprocess
 import tempfile
 import requests
@@ -15,7 +14,6 @@ from datetime import date
 from pathlib import Path
 from config import (
     PEXELS_API_URL, PIXABAY_API_URL,
-    ARTICLE_IMAGE_MAX_SIZE_KB, MAX_FREE_ATTEMPTS,
     GPT_IMAGE_COUNTER_FILE, GPT_IMAGE_MODEL, GPT_IMAGE_SIZE
 )
 
@@ -32,22 +30,13 @@ try:
 except ImportError:
     PIL_AVAILABLE = False
 
-
-# Cache intra-article par hash MD5
-_current_article_hashes = set()
-
-
-def reset_article_url_cache():
-    global _current_article_hashes
-    _current_article_hashes = set()
+# IDs déjà utilisés dans l'article courant
+_used_source_ids = set()
 
 
-def is_hash_used_in_current_article(h: str) -> bool:
-    return h in _current_article_hashes
-
-
-def mark_hash_used_in_article(h: str):
-    _current_article_hashes.add(h)
+def reset_article_cache():
+    global _used_source_ids
+    _used_source_ids = set()
 
 
 def download_and_convert_webp(content: bytes, save_path: str, max_kb: int = 200) -> bool:
@@ -63,7 +52,7 @@ def download_and_convert_webp(content: bytes, save_path: str, max_kb: int = 200)
                 if output.tell() / 1024 <= max_kb:
                     with open(save_path, "wb") as f:
                         f.write(output.getvalue())
-                    print(f"[DA] Sauvegardée : {Path(save_path).name} ({output.tell()//1024}KB)")
+                    print(f"[DA] Sauvegardée: {Path(save_path).name} ({output.tell()//1024}KB)")
                     return True
                 quality -= 10
             img.thumbnail((800, 800), Image.LANCZOS)
@@ -80,10 +69,10 @@ def download_and_convert_webp(content: bytes, save_path: str, max_kb: int = 200)
 
 def validate_image_with_codex(image_path: str, keyword: str, category: str) -> bool:
     prompt = (
-        f"Schau dir dieses Bild genau an.\n\n"
-        f"AKZEPTIERT (JA) NUR wenn Blumen/Pflanzen das HAUPTMOTIV sind.\n"
-        f"ABGELEHNT (NEIN) wenn Gebäude, Fassaden, Architektur oder leere Balkone.\n\n"
-        f"Antworte NUR: JA oder NEIN."
+        "Schau dir dieses Bild an.\n"
+        "JA nur wenn: Blumen/Pflanzen sind HAUPTMOTIV im Vordergrund.\n"
+        "NEIN wenn: Gebäude, Fassaden, Architektur, leere Balkone, Stadtlandschaft.\n"
+        "Antworte NUR: JA oder NEIN."
     )
     try:
         result = subprocess.run(
@@ -110,13 +99,12 @@ def search_pexels(query: str, per_page: int = 10) -> list:
         resp = requests.get(PEXELS_API_URL, headers={"Authorization": api_key},
                            params={"query": query, "per_page": per_page, "orientation": "landscape"}, timeout=10)
         if resp.status_code == 200:
-            results = [{"url": p["src"]["large"], "photographer": p.get("photographer", "Pexels"),
-                        "source": "pexels", "source_url": p.get("url", "")}
-                       for p in resp.json().get("photos", [])]
-            print(f"[DA] Pexels: {len(results)} pour '{query}'")
-            return results
-    except Exception as e:
-        print(f"[DA] Pexels erreur: {e}")
+            return [{"url": p["src"]["large"], "source_id": f"pexels_{p['id']}",
+                     "photographer": p.get("photographer", ""), "source": "pexels",
+                     "source_url": p.get("url", "")}
+                    for p in resp.json().get("photos", [])]
+    except:
+        pass
     return []
 
 
@@ -130,60 +118,70 @@ def search_pixabay(query: str, per_page: int = 10) -> list:
             "safesearch": "true", "ai_generated": "false", "orientation": "horizontal"
         }, timeout=10)
         if resp.status_code == 200:
-            results = [{"url": img.get("largeImageURL", img.get("webformatURL")),
-                        "photographer": img.get("user", "Pixabay"),
-                        "source": "pixabay", "source_url": img.get("pageURL", "")}
-                       for img in resp.json().get("hits", [])]
-            print(f"[DA] Pixabay: {len(results)} pour '{query}'")
-            return results
-    except Exception as e:
-        print(f"[DA] Pixabay erreur: {e}")
+            return [{"url": img.get("largeImageURL", img.get("webformatURL")),
+                     "source_id": f"pixabay_{img['id']}",
+                     "photographer": img.get("user", ""), "source": "pixabay",
+                     "source_url": img.get("pageURL", "")}
+                    for img in resp.json().get("hits", [])]
+    except:
+        pass
     return []
 
 
-def get_gpt_image_count() -> dict:
-    if os.path.exists(GPT_IMAGE_COUNTER_FILE):
-        with open(GPT_IMAGE_COUNTER_FILE, "r") as f:
-            return json.load(f)
-    return {"month": date.today().strftime("%Y-%m"), "count": 0}
-
-
-def increment_gpt_image_count():
-    counter = get_gpt_image_count()
-    current_month = date.today().strftime("%Y-%m")
-    if counter["month"] != current_month:
-        counter = {"month": current_month, "count": 0}
-    counter["count"] += 1
-    os.makedirs(os.path.dirname(GPT_IMAGE_COUNTER_FILE), exist_ok=True)
-    with open(GPT_IMAGE_COUNTER_FILE, "w") as f:
-        json.dump(counter, f)
-    return counter["count"]
-
-
-def fetch_image(query: str, save_path: str, keyword: str, category: str) -> dict:
+def collect_unique_candidates(queries: list) -> list:
     """
-    Fetch image avec anti-doublon MD5 fiable.
-    Hash marqué IMMÉDIATEMENT après téléchargement — avant validation.
-    Garantit zéro doublon même entre requêtes différentes.
+    Collecte des candidats de TOUTES les requêtes et déduplique par source_id.
+    Retourne une liste unique de candidats.
     """
-    MAX_REJECTIONS = 3
+    seen_ids = set()
+    unique = []
+
+    for query in queries:
+        for candidate in search_pexels(query, 10) + search_pixabay(query, 10):
+            sid = candidate["source_id"]
+            if sid not in seen_ids:
+                seen_ids.add(sid)
+                unique.append(candidate)
+
+    print(f"[DA] {len(unique)} candidats uniques collectés")
+    return unique
+
+
+def fetch_n_images(queries: list, n: int, img_dir: str, keyword: str, category: str) -> list:
+    """
+    Collecte N images uniques et validées.
+    1. Pool unique de toutes les requêtes (dédupliqué par source_id)
+    2. Filtre par historique global
+    3. Filtre par IDs déjà utilisés dans l'article
+    4. Validation Codex
+    5. Fallback GPT-image si pas assez d'images
+    """
+    MAX_REJECTIONS = 5
     rejected_count = 0
+    images = []
 
-    candidates = search_pexels(query, 10) + search_pixabay(query, 10)
-    print(f"[DA] {len(candidates)} candidats pour '{query}'")
+    # Collecter tous les candidats uniques
+    candidates = collect_unique_candidates(queries)
 
     for i, candidate in enumerate(candidates):
+        if len(images) >= n:
+            break
         if rejected_count >= MAX_REJECTIONS:
             break
 
+        sid = candidate["source_id"]
         url = candidate["url"]
 
-        # Vérifier historique global
-        if HISTORY_AVAILABLE and is_image_already_used(url):
-            print(f"[DA] ⏭️ URL connue")
+        # Déjà utilisé dans cet article ?
+        if sid in _used_source_ids:
             continue
 
-        # Télécharger UNE SEULE FOIS
+        # Historique global
+        if HISTORY_AVAILABLE and is_image_already_used(url):
+            print(f"[DA] ⏭️ {sid} — historique global")
+            continue
+
+        # Télécharger
         try:
             resp = requests.get(url, timeout=15)
             if resp.status_code != 200:
@@ -192,47 +190,56 @@ def fetch_image(query: str, save_path: str, keyword: str, category: str) -> dict
         except:
             continue
 
-        # Hash MD5 — marquer IMMÉDIATEMENT
-        h = hashlib.md5(content).hexdigest()
-        if is_hash_used_in_current_article(h):
-            print(f"[DA] ⏭️ Photo identique déjà utilisée (MD5)")
-            continue
-        mark_hash_used_in_article(h)  # ← Immédiat, avant validation
-
         # Validation Codex
-        print(f"[DA] Candidat {i+1} ({candidate['source']})...")
+        print(f"[DA] Candidat {sid} — validation...")
         with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as f:
             f.write(content)
             temp_path = f.name
 
         if validate_image_with_codex(temp_path, keyword, category):
-            print(f"[DA] ✅ Validée ({candidate['source']})")
+            img_num = len(images) + 1
+            save_path = str(Path(img_dir) / f"article_img_{img_num:02d}.webp")
             if download_and_convert_webp(content, save_path):
+                _used_source_ids.add(sid)
                 if HISTORY_AVAILABLE:
                     add_image_to_history(url, keyword)
-                return {"path": save_path, "source": candidate["source"],
-                        "photographer": candidate["photographer"],
-                        "source_url": candidate["source_url"], "query": query}
+                alt_text = keyword if img_num == 1 else f"{keyword} - Bild {img_num}"
+                images.append({
+                    "path": save_path, "source": candidate["source"],
+                    "photographer": candidate["photographer"],
+                    "source_url": candidate["source_url"],
+                    "source_id": sid, "alt_text": alt_text
+                })
+                print(f"[DA] ✅ Image {img_num}/{n} ({candidate['source']})")
         else:
             rejected_count += 1
             print(f"[DA] ❌ Rejetée ({rejected_count}/{MAX_REJECTIONS})")
 
-    # Fallback GPT-image-2
-    print(f"[DA] 🔄 GPT-image-2 fallback")
-    try:
-        from openai import OpenAI
-        client = OpenAI()
-        r = client.images.generate(
-            model=GPT_IMAGE_MODEL,
-            prompt=f"Close-up colorful spring flowers balcony box, no buildings, natural light",
-            size=GPT_IMAGE_SIZE, n=1
-        )
-        img_resp = requests.get(r.data[0].url, timeout=15)
-        if img_resp.status_code == 200 and download_and_convert_webp(img_resp.content, save_path):
-            print(f"[DA] GPT-image-2 générée (compteur: {increment_gpt_image_count()})")
-            return {"path": save_path, "source": "gpt_image", "photographer": "AI",
-                    "source_url": "", "query": query}
-    except Exception as e:
-        print(f"[DA] GPT-image-2 erreur: {e}")
+    # Fallback GPT-image si pas assez
+    while len(images) < n:
+        img_num = len(images) + 1
+        save_path = str(Path(img_dir) / f"article_img_{img_num:02d}.webp")
+        print(f"[DA] 🔄 GPT-image fallback pour image {img_num}")
+        try:
+            from openai import OpenAI
+            client = OpenAI()
+            r = client.images.generate(
+                model=GPT_IMAGE_MODEL,
+                prompt=f"Close-up colorful spring flowers balcony, no buildings, natural light, photo {img_num}",
+                size=GPT_IMAGE_SIZE, n=1
+            )
+            img_resp = requests.get(r.data[0].url, timeout=15)
+            if img_resp.status_code == 200 and download_and_convert_webp(img_resp.content, save_path):
+                images.append({
+                    "path": save_path, "source": "gpt_image", "photographer": "AI",
+                    "source_url": "", "source_id": f"gpt_{img_num}",
+                    "alt_text": f"{keyword} - Bild {img_num}"
+                })
+                print(f"[DA] ✅ GPT image {img_num}")
+            else:
+                break
+        except Exception as e:
+            print(f"[DA] GPT erreur: {e}")
+            break
 
-    return {}
+    return images
