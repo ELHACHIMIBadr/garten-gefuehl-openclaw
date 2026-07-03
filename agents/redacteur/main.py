@@ -22,9 +22,9 @@ from pathlib import Path
 from dotenv import load_dotenv
 load_dotenv("/root/garten-gefuehl-openclaw/config/.env")
 
-from openai import OpenAI
 from config import MODEL, ARTICLES_DIR, BRIEFS_DIR, MIN_WORDS, MAX_WORDS
 from prompt_builder import build_article_prompt
+from gpt_client import call_gpt
 from parser import (
     parse_gpt_output, validate_seo_title,
     validate_meta_description, validate_content
@@ -39,7 +39,6 @@ def get_latest_brief() -> dict:
     brief_dir = Path(BRIEFS_DIR) / today
 
     if not brief_dir.exists():
-        # Chercher le brief le plus récent
         all_brief_dirs = sorted(Path(BRIEFS_DIR).iterdir(), reverse=True)
         if not all_brief_dirs:
             raise FileNotFoundError("Aucun brief trouvé dans " + BRIEFS_DIR)
@@ -49,12 +48,10 @@ def get_latest_brief() -> dict:
     if not brief_files:
         raise FileNotFoundError(f"Aucun brief trouvé dans {brief_dir}")
 
-    # Prendre le premier brief non traité
     for brief_file in sorted(brief_files):
         with open(brief_file, "r", encoding="utf-8") as f:
             brief = json.load(f)
-        
-        # Vérifier si ce brief a déjà un article
+
         article_path = Path(ARTICLES_DIR) / brief_file.stem.replace("brief", "article")
         if not article_path.exists():
             print(f"[Rédacteur] Brief chargé : {brief_file}")
@@ -64,40 +61,12 @@ def get_latest_brief() -> dict:
     raise FileNotFoundError("Tous les briefs du jour ont déjà été traités")
 
 
-def call_gpt(prompt: str) -> str:
-    """
-    Appelle GPT via OpenAI API (Codex OAuth).
-    """
-    client = OpenAI()  # Utilise OPENAI_API_KEY ou Codex OAuth automatiquement
-
-    print(f"[Rédacteur] Appel GPT ({MODEL})...")
-
-    response = client.chat.completions.create(
-        model=MODEL,
-        messages=[
-            {
-                "role": "system",
-                "content": "Du bist ein erfahrener deutscher Gartenredakteur. Du schreibst präzise, natürliche und SEO-optimierte Artikel auf Deutsch. Du folgst immer exakt dem vorgegebenen Format."
-            },
-            {
-                "role": "user",
-                "content": prompt
-            }
-        ],
-        max_tokens=4000,
-        temperature=0.7
-    )
-
-    return response.choices[0].message.content
-
-
 def inject_newsletter_block(html_content: str) -> str:
     """
     Injecte le bloc newsletter Brevo après la section Fazit.
-    Remplace le placeholder [NEWSLETTER_BLOCK] par le vrai bloc HTML.
     """
     newsletter_block_path = "/root/garten-gefuehl-openclaw/config/newsletter-trigger.html"
-    
+
     try:
         with open(newsletter_block_path, "r", encoding="utf-8") as f:
             newsletter_html = f.read()
@@ -113,7 +82,6 @@ def save_article(article_data: dict, brief: dict, dry_run: bool = False) -> str:
     article_dir = Path(ARTICLES_DIR) / today
     os.makedirs(article_dir, exist_ok=True)
 
-    # Numéro basé sur le brief source
     source_file = brief.get("_source_file", "brief_01.json")
     num = Path(source_file).stem.replace("brief_", "")
     filepath = article_dir / f"article_{num}.json"
@@ -123,7 +91,7 @@ def save_article(article_data: dict, brief: dict, dry_run: bool = False) -> str:
         "generated_at": datetime.now().isoformat(),
         "brief": brief,
         "article": article_data,
-        "status": "pending_review"  # Sera mis à "approved" par le Correcteur
+        "status": "pending_review"
     }
 
     if not dry_run:
@@ -178,31 +146,30 @@ def run(brief_path: str = None, dry_run: bool = False, max_retries: int = 2):
         print(f"\n[Rédacteur] ÉTAPE 2 — Construction du prompt...")
         prompt = build_article_prompt(brief)
 
-        # ÉTAPE 3 — Appel GPT (avec retry)
+        # ÉTAPE 3 — Appel GPT via OpenClaw Gateway
         article_data = None
         for attempt in range(1, max_retries + 1):
             print(f"\n[Rédacteur] ÉTAPE 3 — Génération article (tentative {attempt}/{max_retries})...")
-            
+
             raw_output = call_gpt(prompt)
-            
+
             # ÉTAPE 4 — Parser la sortie
             print(f"[Rédacteur] ÉTAPE 4 — Parsing...")
             article_data = parse_gpt_output(raw_output)
-            
-            # Vérifications basiques
+
             if article_data["parse_errors"]:
                 print(f"[Rédacteur] ⚠️ Erreurs de parsing : {article_data['parse_errors']}")
                 if attempt < max_retries:
                     print(f"[Rédacteur] Nouvelle tentative...")
                     continue
-            
+
             if article_data["word_count"] < MIN_WORDS:
                 print(f"[Rédacteur] ⚠️ Article trop court ({article_data['word_count']} mots)")
                 if attempt < max_retries:
                     print(f"[Rédacteur] Nouvelle tentative...")
                     continue
-            
-            break  # Article valide
+
+            break
 
         # ÉTAPE 5 — Validations SEO
         print(f"\n[Rédacteur] ÉTAPE 5 — Validations SEO...")
@@ -212,7 +179,7 @@ def run(brief_path: str = None, dry_run: bool = False, max_retries: int = 2):
         seo_errors += validate_content(article_data["html_content"], keyword, MIN_WORDS)
 
         if seo_errors:
-            print(f"[Rédacteur] ⚠️ Erreurs SEO détectées ({len(seo_errors)}) :")
+            print(f"[Rédacteur] ⚠️ Erreurs SEO ({len(seo_errors)}) :")
             for err in seo_errors:
                 print(f"  - {err}")
             article_data["seo_errors"] = seo_errors
@@ -228,14 +195,12 @@ def run(brief_path: str = None, dry_run: bool = False, max_retries: int = 2):
         print(f"\n[Rédacteur] ÉTAPE 7 — Sauvegarde...")
         filepath = save_article(article_data, brief, dry_run)
 
-        # Résumé
         print(f"\n[Rédacteur] ✅ Article généré avec succès")
         print(f"  Titre    : {article_data['seo_title']}")
         print(f"  Mots     : {article_data['word_count']}")
         print(f"  Slug     : {article_data['slug']}")
         print(f"  Erreurs  : {len(article_data.get('seo_errors', []))}")
 
-        # Notification Telegram
         if not dry_run:
             status = "✅" if not article_data.get("seo_errors") else "⚠️"
             send_telegram(
