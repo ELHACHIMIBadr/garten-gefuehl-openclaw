@@ -1,12 +1,15 @@
 """
 Directeur Artistique Agent — Image Sourcer
-Pexels → Pixabay → GPT-image-2 (fallback après 9 essais infructueux)
+Pexels → Pixabay → GPT-image-2 (fallback après 3 rejets de validation Codex)
+Validation visuelle via Codex CLI (-i flag).
 Toutes les images converties en WebP et optimisées < 200KB.
 """
 
 import os
 import io
 import json
+import subprocess
+import tempfile
 import requests
 from datetime import date
 from pathlib import Path
@@ -27,7 +30,6 @@ except ImportError:
 def download_and_convert_webp(url: str, save_path: str, max_kb: int = 200) -> bool:
     """
     Télécharge une image depuis une URL et la convertit en WebP optimisé.
-    Retourne True si succès, False sinon.
     """
     try:
         resp = requests.get(url, timeout=15, stream=True)
@@ -36,12 +38,9 @@ def download_and_convert_webp(url: str, save_path: str, max_kb: int = 200) -> bo
 
         if PIL_AVAILABLE:
             img = Image.open(io.BytesIO(resp.content))
-
-            # Convertir en RGB si nécessaire (pour WebP)
             if img.mode in ("RGBA", "P"):
                 img = img.convert("RGB")
 
-            # Sauvegarder en WebP avec compression progressive
             quality = 85
             while quality >= 50:
                 output = io.BytesIO()
@@ -56,14 +55,12 @@ def download_and_convert_webp(url: str, save_path: str, max_kb: int = 200) -> bo
 
                 quality -= 10
 
-            # Si toujours trop grande, redimensionner
             img.thumbnail((800, 800), Image.LANCZOS)
             img.save(save_path, format="WEBP", quality=75)
-            print(f"[DA] Image redimensionnée et sauvegardée : {Path(save_path).name}")
+            print(f"[DA] Image redimensionnée : {Path(save_path).name}")
             return True
 
         else:
-            # Sans Pillow, sauvegarder tel quel
             with open(save_path, "wb") as f:
                 f.write(resp.content)
             return True
@@ -73,10 +70,90 @@ def download_and_convert_webp(url: str, save_path: str, max_kb: int = 200) -> bo
         return False
 
 
-def search_pexels(query: str, per_page: int = 5) -> list:
+def download_temp_image(url: str) -> str:
+    """
+    Télécharge une image dans un fichier temporaire pour validation Codex.
+    Retourne le chemin du fichier temp, ou "" si échec.
+    """
+    try:
+        resp = requests.get(url, timeout=15)
+        if resp.status_code != 200:
+            return ""
+
+        # Détecter l'extension
+        content_type = resp.headers.get("Content-Type", "image/jpeg")
+        ext = ".jpg"
+        if "png" in content_type:
+            ext = ".png"
+        elif "webp" in content_type:
+            ext = ".webp"
+
+        with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as f:
+            f.write(resp.content)
+            return f.name
+
+    except Exception as e:
+        print(f"[DA] Erreur download temp: {e}")
+        return ""
+
+
+def validate_image_with_codex(image_path: str, keyword: str, category: str) -> bool:
+    """
+    Valide une image via Codex CLI avec le flag -i (image input).
+    Pose une question simple : l'image est-elle pertinente pour le keyword ?
+    Retourne True si pertinente, False sinon.
+    """
+    prompt = (
+        f"Schau dir dieses Bild an. Ist es geeignet als Illustration für einen deutschen Gartenblog-Artikel "
+        f"über '{keyword}' in der Kategorie '{category}'?\n\n"
+        f"Antworte NUR mit JA oder NEIN. Kein weiterer Text."
+    )
+
+    try:
+        result = subprocess.run(
+            [
+                "codex", "exec",
+                "--dangerously-bypass-approvals-and-sandbox",
+                "-i", image_path,
+            ],
+            input=prompt,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            timeout=60
+        )
+
+        output = result.stdout.strip().upper()
+        print(f"[DA] Validation Codex : {output[:50]}")
+
+        # Extraire JA/NEIN de la sortie
+        if "JA" in output or "YES" in output or "OUI" in output:
+            return True
+        elif "NEIN" in output or "NO" in output or "NON" in output:
+            return False
+        else:
+            # Si réponse ambiguë, accepter par défaut
+            print(f"[DA] Réponse ambiguë — acceptée par défaut")
+            return True
+
+    except subprocess.TimeoutExpired:
+        print(f"[DA] Timeout validation Codex — acceptée par défaut")
+        return True
+    except Exception as e:
+        print(f"[DA] Erreur validation Codex: {e} — acceptée par défaut")
+        return True
+    finally:
+        # Nettoyer le fichier temp si c'est un temp file
+        if "/tmp/" in image_path or "\\Temp\\" in image_path:
+            try:
+                os.unlink(image_path)
+            except:
+                pass
+
+
+def search_pexels(query: str, per_page: int = 8) -> list:
     """
     Cherche des images sur Pexels.
-    Retourne une liste de dicts {url, photographer, source}.
     """
     api_key = os.getenv("PEXELS_API_KEY")
     if not api_key:
@@ -105,6 +182,7 @@ def search_pexels(query: str, per_page: int = 5) -> list:
                     "source": "pexels",
                     "source_url": photo.get("url", "")
                 })
+            print(f"[DA] Pexels: {len(results)} résultats pour '{query}'")
             return results
 
     except Exception as e:
@@ -113,7 +191,7 @@ def search_pexels(query: str, per_page: int = 5) -> list:
     return []
 
 
-def search_pixabay(query: str, per_page: int = 5) -> list:
+def search_pixabay(query: str, per_page: int = 8) -> list:
     """
     Cherche des images sur Pixabay (filtre ai_generated=false).
     """
@@ -131,7 +209,7 @@ def search_pixabay(query: str, per_page: int = 5) -> list:
                 "image_type": "photo",
                 "per_page": per_page,
                 "safesearch": "true",
-                "ai_generated": "false",  # Filtre anti-IA
+                "ai_generated": "false",
                 "orientation": "horizontal"
             },
             timeout=10
@@ -147,6 +225,7 @@ def search_pixabay(query: str, per_page: int = 5) -> list:
                     "source": "pixabay",
                     "source_url": img.get("pageURL", "")
                 })
+            print(f"[DA] Pixabay: {len(results)} résultats pour '{query}'")
             return results
 
     except Exception as e:
@@ -173,6 +252,7 @@ def increment_gpt_image_count():
 
     counter["count"] += 1
 
+    os.makedirs(os.path.dirname(GPT_IMAGE_COUNTER_FILE), exist_ok=True)
     with open(GPT_IMAGE_COUNTER_FILE, "w") as f:
         json.dump(counter, f)
 
@@ -181,15 +261,13 @@ def increment_gpt_image_count():
 
 def generate_gpt_image(prompt: str, save_path: str) -> bool:
     """
-    Génère une image via GPT-image-2 (fallback).
-    Utilise le quota GPT Plus inclus.
+    Génère une image via GPT-image-2 (fallback après 3 rejets).
     """
     try:
         from openai import OpenAI
         client = OpenAI()
 
-        print(f"[DA] Génération GPT-image-2 pour: {prompt[:50]}...")
-
+        print(f"[DA] Génération GPT-image-2: {prompt[:60]}...")
         response = client.images.generate(
             model=GPT_IMAGE_MODEL,
             prompt=prompt,
@@ -211,46 +289,79 @@ def generate_gpt_image(prompt: str, save_path: str) -> bool:
         return False
 
 
-def fetch_image(query: str, save_path: str, attempt_num: int = 0) -> dict:
+def fetch_image(query: str, save_path: str, keyword: str, category: str) -> dict:
     """
-    Fetch une image selon la chaîne : Pexels → Pixabay → GPT-image.
-    Retourne les métadonnées de l'image.
+    Fetch une image avec validation visuelle Codex.
+    Logique : Pexels → Pixabay → GPT-image-2 (après 3 rejets).
+
+    Pour chaque source :
+    - Récupère plusieurs candidats
+    - Télécharge temporairement chaque candidat
+    - Valide via Codex CLI (-i flag)
+    - Si validée → convertit en WebP final
+    - Si 3 rejets consécutifs → fallback GPT-image-2
     """
-    # ÉTAPE 1 — Pexels
-    pexels_results = search_pexels(query)
-    for result in pexels_results:
-        if download_and_convert_webp(result["url"], save_path):
-            return {
-                "path": save_path,
-                "source": "pexels",
-                "photographer": result["photographer"],
-                "source_url": result["source_url"],
-                "query": query
-            }
+    MAX_VALIDATION_ATTEMPTS = 3
+    rejected_count = 0
 
-    # ÉTAPE 2 — Pixabay
-    pixabay_results = search_pixabay(query)
-    for result in pixabay_results:
-        if download_and_convert_webp(result["url"], save_path):
-            return {
-                "path": save_path,
-                "source": "pixabay",
-                "photographer": result["photographer"],
-                "source_url": result["source_url"],
-                "query": query
-            }
+    all_candidates = []
 
-    # ÉTAPE 3 — Fallback GPT-image (après 9 essais infructueux)
-    if attempt_num >= MAX_FREE_ATTEMPTS:
-        gpt_prompt = f"Beautiful professional garden photography: {query}. Natural light, high quality, no text."
-        if generate_gpt_image(gpt_prompt, save_path):
-            return {
-                "path": save_path,
-                "source": "gpt_image",
-                "photographer": "AI Generated",
-                "source_url": "",
-                "query": query
-            }
+    # Collecter tous les candidats (Pexels + Pixabay)
+    pexels_results = search_pexels(query, per_page=5)
+    all_candidates.extend(pexels_results)
+
+    pixabay_results = search_pixabay(query, per_page=5)
+    all_candidates.extend(pixabay_results)
+
+    print(f"[DA] {len(all_candidates)} candidats à valider pour '{query}'")
+
+    for i, candidate in enumerate(all_candidates):
+        if rejected_count >= MAX_VALIDATION_ATTEMPTS:
+            break
+
+        print(f"[DA] Candidat {i+1}/{len(all_candidates)} ({candidate['source']}) — validation Codex...")
+
+        # Télécharger temporairement pour validation
+        temp_path = download_temp_image(candidate["url"])
+        if not temp_path:
+            continue
+
+        # Validation visuelle Codex
+        is_valid = validate_image_with_codex(temp_path, keyword, category)
+
+        if is_valid:
+            print(f"[DA] ✅ Image validée ({candidate['source']})")
+            # Télécharger et convertir en WebP final
+            if download_and_convert_webp(candidate["url"], save_path):
+                return {
+                    "path": save_path,
+                    "source": candidate["source"],
+                    "photographer": candidate["photographer"],
+                    "source_url": candidate["source_url"],
+                    "query": query,
+                    "validated": True
+                }
+        else:
+            rejected_count += 1
+            print(f"[DA] ❌ Image rejetée ({rejected_count}/{MAX_VALIDATION_ATTEMPTS})")
+
+    # Fallback GPT-image-2 après 3 rejets
+    print(f"[DA] 🔄 Fallback GPT-image-2 après {rejected_count} rejets")
+    gpt_prompt = (
+        f"Professional garden photography for a German gardening blog. "
+        f"Topic: '{keyword}'. Category: {category}. "
+        f"Show beautiful, colorful, realistic garden scene. Natural light. No text. No watermarks."
+    )
+
+    if generate_gpt_image(gpt_prompt, save_path):
+        return {
+            "path": save_path,
+            "source": "gpt_image",
+            "photographer": "AI Generated",
+            "source_url": "",
+            "query": query,
+            "validated": True
+        }
 
     print(f"[DA] ⚠️ Aucune image trouvée pour: {query}")
     return {}

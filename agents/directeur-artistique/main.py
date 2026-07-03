@@ -14,7 +14,6 @@ Cron (après Correcteur):
 """
 
 import os
-import sys
 import json
 import re
 import argparse
@@ -27,7 +26,7 @@ load_dotenv("/root/garten-gefuehl-openclaw/config/.env")
 
 from config import (
     ARTICLES_DIR, IMAGES_DIR, PINS_DIR,
-    CATEGORY_IMAGE_KEYWORDS, ARTICLE_IMAGE_MAX_SIZE_KB
+    CATEGORY_IMAGE_KEYWORDS
 )
 from image_sourcer import fetch_image
 from pin_creator import create_all_pins
@@ -54,31 +53,14 @@ def get_latest_approved_article() -> tuple:
 
 
 def get_image_queries(brief: dict, article: dict) -> list:
-    """
-    Génère les requêtes de recherche d'images basées sur le brief.
-    """
+    """Génère les requêtes de recherche d'images basées sur le brief."""
     category = brief.get("categorie_wp", "Garten Gefühl")
-    keyword = brief.get("keyword_principal", "")
-
-    # Keywords de base par catégorie
     base_queries = CATEGORY_IMAGE_KEYWORDS.get(category, ["garden"])
-
-    # Extraire les H2 de l'article pour des requêtes plus précises
-    html_content = article.get("html_content", "")
-    h2_matches = re.findall(r"<h2[^>]*>(.*?)</h2>", html_content, re.IGNORECASE | re.DOTALL)
-    h2_texts = [re.sub(r"<[^>]+>", "", h).strip() for h in h2_matches[:5]]
-
-    # Traduire les H2 en requêtes anglaises (simplification : utiliser mots-clés catégorie)
-    queries = base_queries[:6]  # Max 6 images article
-
-    return queries
+    return base_queries[:4]  # Max 4 images article
 
 
 def upload_to_wordpress_media(image_path: str, alt_text: str, keyword: str) -> dict:
-    """
-    Upload une image dans la médiathèque WordPress via REST API.
-    Retourne les infos de l'image uploadée (id, url).
-    """
+    """Upload une image dans la médiathèque WordPress via REST API."""
     wp_url = os.getenv("WP_URL", "https://xn--garten-gefhl-mlb.de")
     wp_user = os.getenv("WP_USER")
     wp_password = os.getenv("WP_APP_PASSWORD", "").replace(" ", "")
@@ -108,7 +90,6 @@ def upload_to_wordpress_media(image_path: str, alt_text: str, keyword: str) -> d
             media = resp.json()
             media_id = media.get("id")
 
-            # Mettre à jour l'alt text
             requests.post(
                 f"{wp_url}/wp-json/wp/v2/media/{media_id}",
                 auth=(wp_user, wp_password),
@@ -123,7 +104,7 @@ def upload_to_wordpress_media(image_path: str, alt_text: str, keyword: str) -> d
                 "alt_text": alt_text
             }
         else:
-            print(f"[DA] Erreur upload WordPress: {resp.status_code} — {resp.text[:100]}")
+            print(f"[DA] Erreur upload WordPress: {resp.status_code}")
             return {}
 
     except Exception as e:
@@ -132,18 +113,13 @@ def upload_to_wordpress_media(image_path: str, alt_text: str, keyword: str) -> d
 
 
 def inject_images_in_html(html_content: str, images: list) -> str:
-    """
-    Injecte les images dans le HTML après chaque H2.
-    """
+    """Injecte les images dans le HTML après chaque H2."""
     if not images:
         return html_content
 
     image_index = 0
-    result = html_content
-
-    # Trouver tous les H2 et injecter une image après chacun
     h2_pattern = re.compile(r"(</h2>)", re.IGNORECASE)
-    parts = h2_pattern.split(result)
+    parts = h2_pattern.split(html_content)
 
     new_parts = []
     for part in parts:
@@ -172,12 +148,11 @@ def save_article(filepath: Path, data: dict, dry_run: bool = False):
 
 
 def send_telegram(message: str):
-    import requests as req
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     chat_id = os.getenv("TELEGRAM_CHAT_ID")
     if token and chat_id:
         try:
-            req.post(
+            requests.post(
                 f"https://api.telegram.org/bot{token}/sendMessage",
                 json={"chat_id": chat_id, "text": message, "parse_mode": "HTML"},
                 timeout=10
@@ -210,43 +185,43 @@ def run(article_path: str = None, dry_run: bool = False):
         print(f"[DA] Keyword : {keyword}")
         print(f"[DA] Catégorie : {category}")
 
-        # Créer dossiers images
         today = date.today().isoformat()
         img_dir = Path(IMAGES_DIR) / today
         pins_dir = Path(PINS_DIR) / today
         os.makedirs(img_dir, exist_ok=True)
         os.makedirs(pins_dir, exist_ok=True)
 
-        # ÉTAPE 2 — Sourcer les images article
-        print(f"\n[DA] ÉTAPE 2 — Sourcing images article...")
+        # ÉTAPE 2 — Sourcer les images avec validation Codex
+        print(f"\n[DA] ÉTAPE 2 — Sourcing images avec validation Codex...")
         queries = get_image_queries(brief, article)
         images_data = []
-        attempt_count = 0
 
         for i, query in enumerate(queries):
             img_path = str(img_dir / f"article_img_{i+1:02d}.webp")
             alt_text = keyword if i == 0 else f"{keyword} - {query}"
 
-            print(f"[DA] Image {i+1}/{len(queries)} : '{query}'")
-            result = fetch_image(query, img_path, attempt_count)
+            print(f"\n[DA] Image {i+1}/{len(queries)} : '{query}'")
+            result = fetch_image(
+                query=query,
+                save_path=img_path,
+                keyword=keyword,
+                category=category
+            )
 
             if result:
                 result["alt_text"] = alt_text
                 images_data.append(result)
-                attempt_count = 0
-            else:
-                attempt_count += 1
 
-        print(f"[DA] {len(images_data)}/{len(queries)} images sourcées")
+        print(f"\n[DA] {len(images_data)}/{len(queries)} images validées et sourcées")
 
-        # ÉTAPE 3 — Upload WordPress (sauf dry-run)
+        # ÉTAPE 3 — Upload WordPress
         print(f"\n[DA] ÉTAPE 3 — Upload médiathèque WordPress...")
         wp_images = []
         featured_image_id = None
 
         for i, img in enumerate(images_data):
             if dry_run:
-                print(f"[DA] DRY RUN — Upload simulé: {img['path']}")
+                print(f"[DA] DRY RUN — Upload simulé: {img['path']} ({img.get('source', '?')})")
                 wp_images.append({
                     "id": 999 + i,
                     "url": img["path"],
@@ -254,11 +229,7 @@ def run(article_path: str = None, dry_run: bool = False):
                     "source": img.get("source", "unknown")
                 })
             else:
-                wp_result = upload_to_wordpress_media(
-                    img["path"],
-                    img["alt_text"],
-                    keyword
-                )
+                wp_result = upload_to_wordpress_media(img["path"], img["alt_text"], keyword)
                 if wp_result:
                     wp_result["source"] = img.get("source", "unknown")
                     wp_images.append(wp_result)
@@ -275,8 +246,8 @@ def run(article_path: str = None, dry_run: bool = False):
         # ÉTAPE 5 — Créer les 5 pins Pinterest
         print(f"\n[DA] ÉTAPE 5 — Création pins Pinterest...")
         base_image = images_data[0]["path"] if images_data else None
-
         pins = []
+
         if base_image and not dry_run:
             pins = create_all_pins(
                 base_image_path=base_image,
@@ -287,16 +258,17 @@ def run(article_path: str = None, dry_run: bool = False):
             )
         elif dry_run:
             print(f"[DA] DRY RUN — 5 pins simulés")
-            pins = [{"account": acc, "title": article["seo_title"], "path": "DRY_RUN"} 
-                   for acc in ["Blumenliebe DE", "Balkon Ideen DE", "Rosenfreude DE", "Terrasse & Garten DE", "Garten Gefühl"]]
+            pins = [
+                {"account": acc, "title": article["seo_title"], "path": "DRY_RUN"}
+                for acc in ["Blumenliebe DE", "Balkon Ideen DE", "Rosenfreude DE", "Terrasse & Garten DE", "Garten Gefühl"]
+            ]
 
-        # ÉTAPE 6 — Mettre à jour l'article
+        # ÉTAPE 6 — Sauvegarder
         data["article"] = article
         data["pins"] = pins
         data["status"] = "ready_to_publish"
         save_article(filepath, data, dry_run)
 
-        # Résumé
         print(f"\n[DA] ✅ Directeur Artistique terminé")
         print(f"  Images article : {len(wp_images)}")
         print(f"  Pins Pinterest : {len(pins)}/5")
