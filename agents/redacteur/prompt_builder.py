@@ -7,27 +7,19 @@ from config import MIN_WORDS, MAX_WORDS, FORBIDDEN_PHRASES
 
 
 def build_article_prompt(brief: dict) -> str:
-    """
-    Construit le prompt complet pour la rédaction de l'article.
-    """
     keyword = brief["keyword_principal"]
     keywords_secondaires = brief.get("keywords_secondaires", [])
     angle = brief.get("angle_recommande", "")
     format_article = brief.get("format", "ratgeber")
     faq_questions = brief.get("faq_questions", [])
     categorie = brief.get("categorie_wp", "")
-    traduction_fr = brief.get("traduction_fr", "")
 
-    # Construire la liste des keywords secondaires
     secondary_kw_list = "\n".join([
         f"- {kw['keyword']} (volume: {kw.get('volume', '?')}/mois)"
         for kw in keywords_secondaires[:5]
     ])
 
-    # Construire la liste des questions FAQ
     faq_list = "\n".join([f"- {q}" for q in faq_questions[:5]]) if faq_questions else "Aucune"
-
-    # Construire la liste des phrases interdites
     forbidden_list = "\n".join([f"- \"{p}\"" for p in FORBIDDEN_PHRASES])
 
     prompt = f"""Du bist ein erfahrener deutscher Gartenexperte und Redakteur. Du schreibst leidenschaftliche, praxisnahe Gartenartikel für deutschsprachige Leser.
@@ -42,7 +34,7 @@ KEYWORD-DETAILS:
 - Kategorie: {categorie}
 - Empfohlener Winkel: {angle}
 - Format: {format_article}
-- Sekundär-Keywords (natürlich einbauen):
+- Sekundär-Keywords (natürlich einbauen, NICHT übertreiben):
 {secondary_kw_list}
 
 HÄUFIG GESTELLTE FRAGEN (als H2/H3 einbauen wenn relevant):
@@ -50,75 +42,77 @@ HÄUFIG GESTELLTE FRAGEN (als H2/H3 einbauen wenn relevant):
 
 ---
 
-PFLICHT-SEO-REGELN (alle müssen erfüllt sein):
-1. Keyword "{keyword}" im SEO-Titel (am Anfang, getrennt durch Leerzeichen oder em-Dash "–", NIEMALS direkt gefolgt von Doppelpunkt)
-   ✅ Richtig: "{keyword} – 15 Tipps für deinen Garten"
-   ❌ Falsch: "{keyword}: Tipps..."
-2. Keyword "{keyword}" in der Meta-Beschreibung (150-160 Zeichen)
-3. Keyword "{keyword}" im Slug (URL-freundlich, Bindestriche statt Leerzeichen)
-4. Keyword "{keyword}" in den ersten 10% des Textes (idealerweise erster Satz)
-5. Keyword "{keyword}" in mindestens einem H2 oder H3
-6. Alt-Text des Hauptbildes enthält "{keyword}" exakt
-7. Keyword-Dichte: ~1-1.5% (nicht mehr, nicht weniger)
-8. Mindestens 2-3 interne Verlinkungen (Platzhalter: [INTERNER LINK: Thema])
-9. Mindestens 1 externer Link zu einer seriösen deutschen Gartenquelle
-10. Mindestens eine Zahl im SEO-Titel (z.B. "15 Tipps", "7 Ideen")
+KRITISCHE REGELN FÜR DEN INHALT:
+
+⚠️ KEIN H1 IM ARTIKEL — WordPress fügt den Titel automatisch als H1 ein. Beginne direkt mit der Einleitung (normaler Text), dann H2 für die Abschnitte.
+
+⚠️ KEIN BILD AM ANFANG — WordPress zeigt das Hauptbild automatisch. Füge kein Bild am Anfang des Artikels ein.
+
+⚠️ KEYWORD-WIEDERHOLUNG BEGRENZEN — Das Keyword "{keyword}" darf maximal 1x pro 150 Wörter erscheinen. Verwende Synonyme und Variationen:
+- Statt immer "{keyword}" → verwende auch: "Balkonpflanzen im Frühling", "Frühlingsbalkon", "Balkongarten", "Balkonbepflanzung"
+
+⚠️ KEINE PLATZHALTLER — Schreibe KEINE [INTERNER LINK: xxx] Platzhalter. Wenn du interne Links brauchst, schreibe einfach den Text ohne Link-Markup.
+
+---
+
+PFLICHT-SEO-REGELN:
+1. Keyword "{keyword}" im SEO-Titel (am Anfang, mit " –" getrennt, NIEMALS ":")
+   ✅ "{keyword} – 15 Tipps für deinen Garten"
+   ❌ "{keyword}: Tipps..."
+2. Keyword in der Meta-Beschreibung (150-160 Zeichen)
+3. Keyword im Slug
+4. Keyword im ersten Satz der Einleitung
+5. Keyword in mindestens einem H2 oder H3
+6. Alt-Text des Hauptbildes = "{keyword}"
+7. Keyword-Dichte: 0.8%-1.5% (NICHT mehr)
+8. Mindestens 1 externer Link zu einer seriösen deutschen Gartenquelle (z.B. NABU, RHS, Mein schöner Garten)
+9. Mindestens eine Zahl im SEO-Titel
 
 ---
 
 ARTIKEL-STRUKTUR (Pflicht):
-- SEO-Titel (H1): Keyword am Anfang + Zahl + Power-Wort
-- Inhaltsverzeichnis (Tabelle mit H2-Links)
-- Einleitung (150-200 Wörter): Keyword im ersten Satz, persönlicher Ton, Mehrwert versprechen
+- Einleitung (150-200 Wörter): Keyword im ersten Satz, persönlicher Ton
+- Inhaltsverzeichnis (einfache HTML-Tabelle mit H2-Links)
 - 4-6 Hauptabschnitte (H2) mit je 1-2 Unterabschnitten (H3)
-- Praktische Tipps/Listen wo sinnvoll
-- Fazit (100-150 Wörter): Zusammenfassung + Call-to-Action
-- Nach dem Fazit: [NEWSLETTER_BLOCK] als Platzhalter
+- FAQ-Abschnitt (H2) mit 2-3 echten Fragen
+- Fazit (H2, 100-150 Wörter) + Call-to-Action
+- Nach dem Fazit: [NEWSLETTER_BLOCK]
 
 ---
 
 SCHREIBSTIL:
-- Natürliches Deutsch eines leidenschaftlichen Gärtners — KEIN Übersetzungsdeutsch
-- Persönlicher Ton: "Ich empfehle...", "In meinem Garten...", "Meine Erfahrung zeigt..."
+- Natürliches Deutsch eines leidenschaftlichen Gärtners
+- Persönlicher Ton: "Ich empfehle...", "In meinem Garten..."
 - Kurze Absätze (3-5 Sätze)
 - Abwechslungsreiche Satzstrukturen
-- Konkrete, umsetzbare Ratschläge
-- Regionale Bezüge wenn sinnvoll (deutsches Klima, deutsche Pflanzensorten)
+- Synonyme für das Keyword verwenden
 
-VERBOTENE PHRASEN (NIEMALS verwenden):
+VERBOTENE PHRASEN:
 {forbidden_list}
 
 ---
 
-LÄNGE: {MIN_WORDS}-{MAX_WORDS} Wörter (ohne Meta-Daten)
+LÄNGE: {MIN_WORDS}-{MAX_WORDS} Wörter
 
 ---
 
 AUSGABE-FORMAT (exakt einhalten):
 
 ```
-SEO_TITLE: [Titel hier]
-META_DESCRIPTION: [Meta-Beschreibung hier, 150-160 Zeichen]
+SEO_TITLE: [Titel hier - max 65 Zeichen]
+META_DESCRIPTION: [150-160 Zeichen]
 SLUG: [url-slug-hier]
 FOCUS_KEYWORD: {keyword}
 ALT_TEXT_MAIN_IMAGE: [Alt-Text mit exaktem Keyword]
 
 ---ARTIKEL_START---
 
-[Vollständiger HTML-Artikel hier mit H1, H2, H3, Listen, etc.]
+[Vollständiger HTML-Artikel — OHNE H1, OHNE Bild am Anfang]
+Beginne mit: <p>[Einleitungstext...]</p>
+Dann: [Inhaltsverzeichnis als HTML-Tabelle]
+Dann: <h2>...</h2> für jeden Abschnitt
 
 ---ARTIKEL_END---
 ```
-
-Schreibe jetzt den vollständigen Artikel. Keine Erklärungen, direkt mit dem Artikel beginnen.
 """
     return prompt
-
-
-def build_translation_prompt(keyword_en: str) -> str:
-    """
-    Prompt pour traduire/adapter un keyword en allemand naturel.
-    """
-    return f"""Translate this keyword concept to natural German as used in German gardening searches: "{keyword_en}"
-    
-Return ONLY the German translation, no explanation. Maximum 5 words."""

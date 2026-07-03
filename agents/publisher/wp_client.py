@@ -4,13 +4,12 @@ Publication via REST API WordPress.
 """
 
 import os
+import re
 import requests
-from datetime import datetime, timezone, timedelta
 from config import WP_API, WP_CATEGORY_IDS, PUBLISH_STATUS
 
 
 def get_wp_credentials():
-    """Retourne les credentials WordPress."""
     user = os.getenv("WP_USER")
     password = os.getenv("WP_APP_PASSWORD", "").replace(" ", "")
     return user, password
@@ -35,36 +34,80 @@ def get_existing_posts(slug: str) -> list:
 
 def get_category_id(category_name: str) -> int:
     """Retourne l'ID de catégorie WordPress."""
-    # D'abord chercher dans le mapping local
     cat_id = WP_CATEGORY_IDS.get(category_name)
     if cat_id:
         return cat_id
 
-    # Sinon chercher via l'API
     user, password = get_wp_credentials()
     try:
         resp = requests.get(
             f"{WP_API}/categories",
             auth=(user, password),
-            params={"search": category_name, "per_page": 5},
+            params={"search": category_name, "per_page": 10},
             timeout=10
         )
         if resp.status_code == 200:
             categories = resp.json()
             for cat in categories:
                 if cat["name"].lower() == category_name.lower():
+                    print(f"[Publisher] Catégorie '{category_name}' trouvée via API: ID {cat['id']}")
                     return cat["id"]
     except Exception as e:
         print(f"[Publisher] Erreur récupération catégorie: {e}")
 
-    return 1  # Catégorie par défaut (Uncategorized)
+    print(f"[Publisher] ⚠️ Catégorie '{category_name}' non trouvée — utilisation Uncategorized")
+    return 1
+
+
+def clean_content(html_content: str, keyword: str) -> str:
+    """
+    Nettoie le contenu HTML avant publication :
+    1. Supprime les H1 résiduels (WordPress génère le H1 automatiquement)
+    2. Supprime la première image si elle précède le contenu (WordPress affiche la featured image)
+    3. Supprime les placeholders [INTERNER LINK: xxx]
+    4. Supprime les blocs ```html ... ``` résiduels de GPT
+    """
+    content = html_content
+
+    # 1. Supprimer tous les H1
+    content = re.sub(r"<h1[^>]*>.*?</h1>", "", content, flags=re.IGNORECASE | re.DOTALL)
+
+    # 2. Supprimer la première image si elle est dans les 500 premiers caractères
+    # (WordPress affiche la featured image automatiquement)
+    first_500 = content[:500]
+    if "<img" in first_500 or "<figure" in first_500:
+        # Supprimer le premier bloc figure/img
+        content = re.sub(
+            r"^(\s*<figure[^>]*>.*?</figure>\s*)",
+            "",
+            content,
+            count=1,
+            flags=re.IGNORECASE | re.DOTALL
+        )
+        content = re.sub(
+            r"^(\s*<img[^>]*/>\s*)",
+            "",
+            content,
+            count=1,
+            flags=re.IGNORECASE | re.DOTALL
+        )
+
+    # 3. Supprimer les placeholders [INTERNER LINK: xxx]
+    content = re.sub(r"\[INTERNER LINK:[^\]]*\]", "", content)
+    content = re.sub(r"\[INTERNAL LINK:[^\]]*\]", "", content)
+
+    # 4. Nettoyer les balises markdown résiduelles de GPT
+    content = re.sub(r"```html?\s*", "", content)
+    content = re.sub(r"```\s*", "", content)
+
+    # 5. Nettoyer les espaces multiples
+    content = re.sub(r"\n{3,}", "\n\n", content)
+
+    return content.strip()
 
 
 def publish_post(article: dict, brief: dict) -> dict:
-    """
-    Publie l'article sur WordPress via REST API.
-    Retourne les infos de l'article publié.
-    """
+    """Publie l'article sur WordPress via REST API."""
     user, password = get_wp_credentials()
 
     if not user or not password:
@@ -77,25 +120,32 @@ def publish_post(article: dict, brief: dict) -> dict:
 
     # Récupérer l'ID de catégorie
     category_id = get_category_id(brief["categorie_wp"])
+    print(f"[Publisher] Catégorie : {brief['categorie_wp']} → ID {category_id}")
+
+    # Nettoyer le contenu
+    keyword = brief["keyword_principal"]
+    clean_html = clean_content(article["html_content"], keyword)
+    print(f"[Publisher] Contenu nettoyé ({len(clean_html)} caractères)")
 
     # Construire le payload WordPress
     payload = {
         "title": article["seo_title"],
-        "content": article["html_content"],
+        "content": clean_html,
         "slug": article["slug"],
         "status": PUBLISH_STATUS,
         "categories": [category_id],
-        "meta": {
-            "rank_math_focus_keyword": article.get("focus_keyword", brief["keyword_principal"]),
-            "rank_math_description": article["meta_description"],
-        },
         "excerpt": article["meta_description"],
+        "meta": {
+            "rank_math_focus_keyword": article.get("focus_keyword", keyword),
+            "rank_math_description": article["meta_description"],
+        }
     }
 
-    # Ajouter l'image à la une si disponible
+    # Ajouter l'image à la une
     featured_image_id = article.get("featured_image_id")
     if featured_image_id:
         payload["featured_media"] = featured_image_id
+        print(f"[Publisher] Image à la une : ID {featured_image_id}")
 
     # Publier
     print(f"[Publisher] Publication WordPress...")
@@ -114,7 +164,6 @@ def publish_post(article: dict, brief: dict) -> dict:
         print(f"[Publisher] ✅ Article publié — ID: {post_id}")
         print(f"[Publisher] URL: {post_url}")
 
-        # Mettre à jour les métadonnées Rank Math via meta
         _update_rank_math_meta(post_id, article, user, password)
 
         return {
@@ -122,85 +171,39 @@ def publish_post(article: dict, brief: dict) -> dict:
             "url": post_url,
             "slug": article["slug"],
             "title": article["seo_title"],
-            "published_at": datetime.now().isoformat()
+            "published_at": __import__('datetime').datetime.now().isoformat()
         }
     else:
         raise Exception(f"Erreur WordPress {resp.status_code}: {resp.text[:200]}")
 
 
 def _update_rank_math_meta(post_id: int, article: dict, user: str, password: str):
-    """Met à jour les métadonnées Rank Math SEO après publication."""
+    """Met à jour les métadonnées Rank Math SEO."""
     try:
-        # Rank Math utilise des meta custom
         meta_updates = {
             "rank_math_focus_keyword": article.get("focus_keyword", ""),
             "rank_math_description": article.get("meta_description", ""),
-            "_yoast_wpseo_metadesc": article.get("meta_description", ""),  # Compatibilité Yoast
         }
-
         resp = requests.post(
             f"{WP_API}/posts/{post_id}",
             auth=(user, password),
             json={"meta": meta_updates},
             timeout=10
         )
-
         if resp.status_code in (200, 201):
             print(f"[Publisher] Rank Math meta mis à jour")
-        else:
-            print(f"[Publisher] ⚠️ Rank Math meta: {resp.status_code}")
-
     except Exception as e:
         print(f"[Publisher] ⚠️ Erreur Rank Math meta: {e}")
 
 
 def ping_google_indexing(url: str):
-    """
-    Ping Google pour indexation rapide via Search Console API.
-    Utilise le endpoint ping simple (pas besoin d'auth).
-    """
+    """Ping Google Search Console pour indexation."""
     try:
         ping_url = f"https://www.google.com/ping?sitemap=https://xn--garten-gefhl-mlb.de/sitemap_index.xml"
         resp = requests.get(ping_url, timeout=10)
-        if resp.status_code == 200:
-            print(f"[Publisher] Google pingé pour indexation")
-        else:
-            print(f"[Publisher] ⚠️ Ping Google: {resp.status_code}")
+        print(f"[Publisher] Ping Google: {resp.status_code}")
     except Exception as e:
         print(f"[Publisher] ⚠️ Erreur ping Google: {e}")
-
-
-def inject_internal_links(html_content: str, published_posts: list, keyword: str) -> str:
-    """
-    Injecte 2-3 liens internes vers d'autres articles du blog.
-    published_posts = liste des articles déjà publiés (url + titre).
-    """
-    if not published_posts:
-        return html_content
-
-    links_injected = 0
-    max_links = 3
-
-    for post in published_posts[:max_links]:
-        post_url = post.get("url", "")
-        post_title = post.get("title", "")
-
-        if not post_url or not post_title:
-            continue
-
-        # Chercher un endroit naturel pour insérer le lien
-        # Injecter avant le premier </p> dans le contenu
-        link_html = f'<a href="{post_url}" title="{post_title}">{post_title}</a>'
-
-        # Remplacer la première occurrence du titre dans le texte
-        if post_title.lower() in html_content.lower():
-            import re
-            pattern = re.compile(re.escape(post_title), re.IGNORECASE)
-            html_content = pattern.sub(link_html, html_content, count=1)
-            links_injected += 1
-
-    print(f"[Publisher] {links_injected} liens internes injectés")
-    return html_content
 
 
 def get_published_posts() -> list:
@@ -215,7 +218,14 @@ def get_published_posts() -> list:
         )
         if resp.status_code == 200:
             posts = resp.json()
-            return [{"url": p.get("link", ""), "title": p.get("title", {}).get("rendered", "")} for p in posts]
+            return [
+                {
+                    "url": p.get("link", ""),
+                    "title": p.get("title", {}).get("rendered", ""),
+                    "slug": p.get("slug", "")
+                }
+                for p in posts
+            ]
     except Exception as e:
         print(f"[Publisher] Erreur récupération posts: {e}")
     return []

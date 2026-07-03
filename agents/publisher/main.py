@@ -1,17 +1,18 @@
 """
 Publisher Agent — Main
-Publie l'article approuvé sur WordPress + ping Google.
+Publie l'article approuvé sur WordPress + ping Google + historique sujets.
 
 Usage:
     python main.py                              # Prend le dernier article ready_to_publish
     python main.py --article path/to/article.json
-    python main.py --dry-run                    # Test sans publier
+    python main.py --dry-run
 
-Cron (après Directeur Artistique):
+Cron:
     0 8 * * * cd /root/garten-gefuehl-openclaw/agents/publisher && /usr/bin/python3 main.py
 """
 
 import os
+import sys
 import json
 import argparse
 from datetime import date, datetime
@@ -20,11 +21,18 @@ from pathlib import Path
 from dotenv import load_dotenv
 load_dotenv("/root/garten-gefuehl-openclaw/config/.env")
 
+sys.path.insert(0, "/root/garten-gefuehl-openclaw/agents")
+
 from config import ARTICLES_DIR, PING_GOOGLE
 from wp_client import (
-    publish_post, ping_google_indexing,
-    inject_internal_links, get_published_posts
+    publish_post, ping_google_indexing, get_published_posts
 )
+
+try:
+    from history import add_topic_to_history
+    HISTORY_AVAILABLE = True
+except ImportError:
+    HISTORY_AVAILABLE = False
 
 
 def get_latest_ready_article() -> tuple:
@@ -48,7 +56,6 @@ def get_latest_ready_article() -> tuple:
 
 
 def save_article(filepath: Path, data: dict):
-    """Met à jour le fichier article."""
     with open(filepath, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
     print(f"[Publisher] Article mis à jour : {filepath}")
@@ -87,24 +94,17 @@ def run(article_path: str = None, dry_run: bool = False):
         article = data["article"]
         brief = data["brief"]
         keyword = brief["keyword_principal"]
+        category = brief["categorie_wp"]
 
-        print(f"[Publisher] Article : {filepath.name}")
-        print(f"[Publisher] Titre   : {article['seo_title']}")
-        print(f"[Publisher] Keyword : {keyword}")
-        print(f"[Publisher] Slug    : {article['slug']}")
-        print(f"[Publisher] Catégorie : {brief['categorie_wp']}")
+        print(f"[Publisher] Titre    : {article['seo_title']}")
+        print(f"[Publisher] Keyword  : {keyword}")
+        print(f"[Publisher] Slug     : {article['slug']}")
+        print(f"[Publisher] Catégorie: {category}")
 
-        # ÉTAPE 2 — Injecter les liens internes
-        print(f"\n[Publisher] ÉTAPE 2 — Injection liens internes...")
+        # ÉTAPE 2 — Vérifier articles existants (pour liens internes)
+        print(f"\n[Publisher] ÉTAPE 2 — Articles existants...")
         published_posts = get_published_posts()
-        print(f"[Publisher] {len(published_posts)} articles existants trouvés")
-
-        if published_posts and not dry_run:
-            article["html_content"] = inject_internal_links(
-                article["html_content"],
-                published_posts,
-                keyword
-            )
+        print(f"[Publisher] {len(published_posts)} articles existants")
 
         # ÉTAPE 3 — Publication WordPress
         print(f"\n[Publisher] ÉTAPE 3 — Publication WordPress...")
@@ -113,7 +113,7 @@ def run(article_path: str = None, dry_run: bool = False):
             print(f"[Publisher] DRY RUN — Publication simulée")
             print(f"  Titre    : {article['seo_title']}")
             print(f"  Slug     : {article['slug']}")
-            print(f"  Catégorie: {brief['categorie_wp']}")
+            print(f"  Catégorie: {category}")
             print(f"  Mots     : {article.get('word_count', '?')}")
             print(f"  Images   : {len(article.get('images', []))}")
 
@@ -133,24 +133,26 @@ def run(article_path: str = None, dry_run: bool = False):
                 print(f"\n[Publisher] ÉTAPE 4 — Ping Google...")
                 ping_google_indexing(publish_result["url"])
 
-        # Sauvegarder
+            # ÉTAPE 5 — Ajouter à l'historique des sujets
+            if HISTORY_AVAILABLE:
+                add_topic_to_history(keyword, category, publish_result["url"])
+                print(f"[Publisher] Sujet ajouté à l'historique")
+
         save_article(filepath, data)
 
-        # Résumé
         post_url = data["publish_result"].get("url", "N/A")
-        print(f"\n[Publisher] ✅ Article publié avec succès !")
+        print(f"\n[Publisher] ✅ Article publié !")
         print(f"  URL : {post_url}")
 
-        # Notification Telegram
         if not dry_run:
             send_telegram(
-                f"🚀 <b>Publisher — Article publié !</b>\n\n"
-                f"📝 Titre : {article['seo_title']}\n"
-                f"🔑 Keyword : {keyword}\n"
-                f"🔗 URL : {post_url}\n"
-                f"📊 Mots : {article.get('word_count', '?')}\n"
-                f"🖼️ Images : {len(article.get('images', []))}\n"
-                f"➡️ Passé au Distributeur Pinterest"
+                f"🚀 <b>Article publié !</b>\n\n"
+                f"📝 {article['seo_title']}\n"
+                f"🔑 {keyword}\n"
+                f"🔗 {post_url}\n"
+                f"📊 {article.get('word_count', '?')} mots\n"
+                f"🖼️ {len(article.get('images', []))} images\n"
+                f"➡️ Distributeur Pinterest"
             )
 
     except Exception as e:
