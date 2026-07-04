@@ -1,0 +1,25 @@
+{
+  "date": "2026-07-03",
+  "keyword_principal": "Balkon bepflanzen Frühling",
+  "traduction_fr": "Planter son balcon au printemps",
+  "keywords_secondaires": [
+    {"keyword": "Balkonpflanzen Frühjahr", "volume": 880},
+    {"keyword": "Balkon Blumen pflanzen", "volume": 1200},
+    {"keyword": "Frühblüher Balkon", "volume": 590}
+  ],
+  "volume_mensuel": 2400,
+  "cpc": 0.45,
+  "concurrence": "LOW",
+  "trend": "+15%",
+  "categorie_wp": "Balkon",
+  "categorie_slug": "balkon",
+  "traduction_fr_categorie": "balcon",
+  "pinterest_account": "Balkon Ideen DE",
+  "angle_recommande": "15 Balkonpflanzen die im Frühling blühen",
+  "format": "listicle",
+  "faq_questions": [
+    "Welche Pflanzen eignen sich für den Balkon im Frühling?",
+    "Wann kann man den Balkon bepflanzen?"
+  ],
+  "score": 85.5
+}

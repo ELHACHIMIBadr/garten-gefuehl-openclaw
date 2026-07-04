@@ -70,7 +70,10 @@ def filter_keywords(keywords_data: dict, volumes_data: dict, history: dict) -> L
         "liefern", "versand", "expresslieferung",
         # Magasins spécifiques
         "müller", "aldi", "lidl", "rewe", "edeka", "penny", "obi",
-        "hornbach", "bauhaus", "ikea", "amazon",
+        "hornbach", "bauhaus", "ikea", "amazon", "ambiente",
+        # Villes allemandes
+        "berlin", "münchen", "hamburg", "köln", "frankfurt",
+        "wien", "wienhausen", "zürich", "animal crossing",
         # Hors niche
         "tattoo", "tätowierung", "hochzeit", "braut", "strauß hochzeit",
         "foto", "fotografie", "bilder", "tapete", "clipart",
@@ -188,10 +191,25 @@ def select_best_keyword(scored_keywords: List[dict], category_name: str) -> dict
         return None
 
     category_lower = category_name.lower()
+    INTENT_WORDS = [
+        "tipps", "ideen", "pflege", "anleitung", "gestalten",
+        "pflanzen", "schneiden", "düngen", "anlegen", "richtig",
+        "beste", "schönste", "einfach", "wann", "wie", "wenig",
+        "mehrjährig", "winterhart", "schnellwachsend", "deko"
+    ]
 
-    # Priorité : keyword qui matche la catégorie ET a une intention forte
-    for kw in scored_keywords[:20]:
-        if category_lower in kw["keyword_lower"]:
+    # 1er choix : catégorie + intention
+    for kw in scored_keywords[:50]:
+        has_intent = any(w in kw["keyword_lower"] for w in INTENT_WORDS)
+        has_category = category_lower in kw["keyword_lower"]
+        if has_intent and has_category:
             return kw
 
+    # 2ème choix : intention seule (sans catégorie)
+    for kw in scored_keywords[:50]:
+        has_intent = any(w in kw["keyword_lower"] for w in INTENT_WORDS)
+        if has_intent:
+            return kw
+
+    # Fallback
     return scored_keywords[0]

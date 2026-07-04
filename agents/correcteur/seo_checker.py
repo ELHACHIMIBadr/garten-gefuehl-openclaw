@@ -217,7 +217,7 @@ def check_all_seo_rules(article: dict, brief: dict) -> Dict[str, list]:
         warnings.append(f"⚠️ {len(long_paragraphs)} paragraphe(s) trop long(s) (>80 mots)")
 
     # 19. Images dans le contenu
-    images = re.findall(r"<img", html_content, re.IGNORECASE)
+    images = re.findall(r"<img|\[BILD_\d\]", html_content, re.IGNORECASE)
     if len(images) >= 2:
         passed.append(f"✅ Images dans le contenu ({len(images)} images)")
     else:

@@ -1,0 +1,79 @@
+{
+  "date": "2026-07-04",
+  "generated_at": "2026-07-04T11:16:51.890507",
+  "ga4": {
+    "date": null,
+    "sessions": 0,
+    "users": 0,
+    "pageviews": 0,
+    "bounce_rate": 0.0,
+    "avg_session_duration_s": 0,
+    "new_users": 0,
+    "top_pages": [],
+    "traffic_sources": {}
+  },
+  "search_console": {
+    "period": null,
+    "clicks": 0,
+    "impressions": 0,
+    "ctr": 0.0,
+    "position": 0.0,
+    "top_queries": [],
+    "top_pages": []
+  },
+  "pinterest": {
+    "accounts": {
+      "Blumenliebe DE": {
+        "account": "Blumenliebe DE",
+        "period": null,
+        "impressions": 0,
+        "saves": 0,
+        "pin_clicks": 0,
+        "link_clicks": 0,
+        "top_pins": []
+      },
+      "Balkon Ideen DE": {
+        "account": "Balkon Ideen DE",
+        "period": null,
+        "impressions": 0,
+        "saves": 0,
+        "pin_clicks": 0,
+        "link_clicks": 0,
+        "top_pins": []
+      },
+      "Rosenfreude DE": {
+        "account": "Rosenfreude DE",
+        "period": null,
+        "impressions": 0,
+        "saves": 0,
+        "pin_clicks": 0,
+        "link_clicks": 0,
+        "top_pins": []
+      },
+      "Terrasse & Garten DE": {
+        "account": "Terrasse & Garten DE",
+        "period": null,
+        "impressions": 0,
+        "saves": 0,
+        "pin_clicks": 0,
+        "link_clicks": 0,
+        "top_pins": []
+      },
+      "Garten Gefühl": {
+        "account": "Garten Gefühl",
+        "period": null,
+        "impressions": 0,
+        "saves": 0,
+        "pin_clicks": 0,
+        "link_clicks": 0,
+        "top_pins": []
+      }
+    },
+    "totals": {
+      "impressions": 0,
+      "saves": 0,
+      "link_clicks": 0,
+      "pin_clicks": 0
+    }
+  }
+}
