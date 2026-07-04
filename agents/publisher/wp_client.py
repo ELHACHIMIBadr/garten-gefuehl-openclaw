@@ -1,6 +1,10 @@
 """
 Publisher Agent — WordPress Client
 Publication via REST API WordPress.
+
+CHANGELOG v2:
+- clean_content() : ajout nettoyage des placeholders [BILD_X] résiduels
+  au cas où le DA n'aurait pas pu remplacer tous les placeholders GPT.
 """
 
 import os
@@ -66,6 +70,8 @@ def clean_content(html_content: str, keyword: str) -> str:
     2. Supprime la première image si elle précède le contenu (WordPress affiche la featured image)
     3. Supprime les placeholders [INTERNER LINK: xxx]
     4. Supprime les blocs ```html ... ``` résiduels de GPT
+    5. Supprime les placeholders [BILD_X] résiduels (si DA n'a pas pu remplacer)
+    6. Nettoie les espaces multiples
     """
     content = html_content
 
@@ -73,10 +79,8 @@ def clean_content(html_content: str, keyword: str) -> str:
     content = re.sub(r"<h1[^>]*>.*?</h1>", "", content, flags=re.IGNORECASE | re.DOTALL)
 
     # 2. Supprimer la première image si elle est dans les 500 premiers caractères
-    # (WordPress affiche la featured image automatiquement)
     first_500 = content[:500]
     if "<img" in first_500 or "<figure" in first_500:
-        # Supprimer le premier bloc figure/img
         content = re.sub(
             r"^(\s*<figure[^>]*>.*?</figure>\s*)",
             "",
@@ -100,7 +104,14 @@ def clean_content(html_content: str, keyword: str) -> str:
     content = re.sub(r"```html?\s*", "", content)
     content = re.sub(r"```\s*", "", content)
 
-    # 5. Nettoyer les espaces multiples
+    # 5. Supprimer les placeholders [BILD_X] résiduels
+    # (sécurité : si le DA n'a pas pu remplacer certains placeholders GPT)
+    residual_bilder = re.findall(r"\[BILD_\d+\]", content)
+    if residual_bilder:
+        print(f"[Publisher] 🧹 {len(residual_bilder)} placeholder(s) [BILD_X] résiduels supprimés: {residual_bilder}")
+        content = re.sub(r"\[BILD_\d+\]", "", content)
+
+    # 6. Nettoyer les espaces multiples
     content = re.sub(r"\n{3,}", "\n\n", content)
 
     return content.strip()
@@ -142,10 +153,15 @@ def publish_post(article: dict, brief: dict) -> dict:
     }
 
     # Ajouter l'image à la une
+    # ⚠️ IMPORTANT : pour que la featured image s'affiche dans l'article,
+    # activer dans WordPress → Apparence → Personnaliser → Blog →
+    # Article unique → cocher "Image mise en avant"
     featured_image_id = article.get("featured_image_id")
     if featured_image_id:
         payload["featured_media"] = featured_image_id
         print(f"[Publisher] Image à la une : ID {featured_image_id}")
+    else:
+        print(f"[Publisher] ⚠️ Pas d'image à la une (featured_image_id manquant)")
 
     # Publier
     print(f"[Publisher] Publication WordPress...")

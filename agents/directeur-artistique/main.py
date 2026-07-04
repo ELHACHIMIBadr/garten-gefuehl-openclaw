@@ -1,10 +1,18 @@
 """
 Directeur Artistique Agent — Main
+
+CHANGELOG v2:
+- Bug 1 + 2 corrigés : injection par placeholders [BILD_X] au lieu d'injection par position.
+  Plus d'images dupliquées ni d'images empilées — GPT place les placeholders aux bons endroits.
+- n_images = 5 : 1 featured image + 4 images texte ([BILD_1] à [BILD_4]).
+- Bug 3 : validation Codex plus stricte (voir image_sourcer.py).
+- Bug 4 : featured_image_id correctement transmis au Publisher.
+  ⚠️ Côté WordPress : activer dans GeneratePress → Personnaliser → Blog →
+    Article unique → "Image mise en avant" pour l'afficher en haut de l'article.
 """
 
 import os
 import json
-import re
 import argparse
 import requests
 from datetime import date, datetime
@@ -94,64 +102,51 @@ def upload_to_wordpress_media(image_path: str, alt_text: str, keyword: str) -> d
     return {}
 
 
-def inject_images_in_html(html_content: str, images: list) -> str:
+def replace_image_placeholders(html_content: str, images: list) -> str:
     """
-    Injection simple et robuste :
-    Divise le texte en N+1 segments égaux (par caractères).
-    Insère chaque image au point </p> le plus proche du point de découpe.
+    Remplace les placeholders [BILD_1] à [BILD_N] par les balises <figure> correspondantes.
+
+    Logique :
+    - images[0] = featured image (déjà assignée via featured_media WP) → PAS de placeholder
+    - images[1] → [BILD_1], images[2] → [BILD_2], images[3] → [BILD_3], images[4] → [BILD_4]
+
+    Si un placeholder est absent (GPT a oublié), l'image est ajoutée en fin de contenu (fallback).
+    Si un placeholder est présent mais plus d'images disponibles, il est supprimé proprement.
     """
-    if not images:
-        return html_content
-
-    n = len(images)
-    total_len = len(html_content)
-    segment_len = total_len // (n + 1)
-
-    # Trouver toutes les positions </p>
-    p_positions = [m.end() for m in re.finditer(r"</p>", html_content, re.IGNORECASE)]
-    # Filtrer : skip les 800 premiers chars (intro + TOC)
-    p_positions = [p for p in p_positions if p > 800]
-
-    if not p_positions:
-        return html_content
-
-    # Pour chaque image, trouver le </p> le plus proche du point de découpe
-    inject_points = []
-    used_p_indices = set()
-
-    for k in range(1, n + 1):
-        target = k * segment_len
-        # Trouver le </p> le plus proche
-        best_idx = None
-        best_dist = float('inf')
-        for j, p in enumerate(p_positions):
-            if j in used_p_indices:
-                continue
-            dist = abs(p - target)
-            if dist < best_dist:
-                best_dist = dist
-                best_idx = j
-        if best_idx is not None:
-            inject_points.append(p_positions[best_idx])
-            used_p_indices.add(best_idx)
-
-    # Trier les points d'injection
-    inject_points.sort()
-
-    # Insérer les images (en ordre inverse pour ne pas décaler les positions)
     result = html_content
-    for i in range(len(inject_points) - 1, -1, -1):
-        if i >= len(images):
-            continue
-        img = images[i]
-        img_html = (
-            f'\n<figure class="wp-block-image size-large" style="margin:30px 0;">'
-            f'<img src="{img.get("url", img.get("path", ""))}" '
-            f'alt="{img.get("alt_text", "")}" loading="lazy" /></figure>\n'
-        )
-        result = result[:inject_points[i]] + img_html + result[inject_points[i]:]
 
-    print(f"[DA] {min(len(inject_points), len(images))} images injectées (espacées)")
+    # images[0] = featured only → on commence à images[1] pour les placeholders texte
+    text_images = images[1:] if len(images) > 1 else []
+
+    injected = 0
+    for i, img in enumerate(text_images, 1):
+        placeholder = f"[BILD_{i}]"
+        img_url = img.get("url") or img.get("path", "")
+        alt = img.get("alt_text", "")
+
+        img_html = (
+            f'\n<figure class="wp-block-image size-large" style="margin:30px 0 30px 0;">'
+            f'<img src="{img_url}" alt="{alt}" loading="lazy" /></figure>\n'
+        )
+
+        if placeholder in result:
+            result = result.replace(placeholder, img_html, 1)
+            injected += 1
+            print(f"[DA] ✅ {placeholder} → image {i} injectée")
+        else:
+            # Fallback : GPT n'a pas placé ce placeholder → append en fin de contenu
+            result += img_html
+            injected += 1
+            print(f"[DA] ⚠️ {placeholder} absent — image {i} ajoutée en fin de contenu (fallback)")
+
+    # Nettoyer les placeholders orphelins restants (GPT en a trop mis)
+    for k in range(1, 6):
+        orphan = f"[BILD_{k}]"
+        if orphan in result:
+            result = result.replace(orphan, "")
+            print(f"[DA] 🧹 {orphan} orphelin supprimé")
+
+    print(f"[DA] {injected}/{len(text_images)} images injectées via placeholders")
     return result
 
 
@@ -203,9 +198,10 @@ def run(article_path=None, dry_run=False):
         os.makedirs(img_dir, exist_ok=True)
         os.makedirs(pins_dir, exist_ok=True)
 
-        # ÉTAPE 2 — Sourcing images (N images uniques)
+        # ÉTAPE 2 — Sourcing images
+        # 5 images : index 0 = featured image, index 1-4 = [BILD_1] à [BILD_4] dans le texte
         queries = CATEGORY_IMAGE_KEYWORDS.get(category, ["garden"])[:4]
-        n_images = 4
+        n_images = 5
 
         if dry_run:
             images_data = [{"path": f"DRY_{i}", "source": "dry", "alt_text": keyword,
@@ -217,6 +213,9 @@ def run(article_path=None, dry_run=False):
 
         print(f"[DA] {len(images_data)} images uniques trouvées")
 
+        if len(images_data) < 2:
+            raise Exception(f"Pas assez d'images ({len(images_data)}/5) — pipeline arrêté")
+
         # ÉTAPE 3 — Upload WordPress
         print(f"\n[DA] ÉTAPE 3 — Upload WordPress...")
         wp_images = []
@@ -224,21 +223,26 @@ def run(article_path=None, dry_run=False):
 
         for i, img in enumerate(images_data):
             if dry_run:
-                wp_images.append({"id": 999+i, "url": img["path"], "alt_text": img["alt_text"]})
+                wp_img = {"id": 999 + i, "url": img["path"], "alt_text": img["alt_text"]}
             else:
-                wp_result = upload_to_wordpress_media(img["path"], img["alt_text"], keyword)
-                if wp_result:
-                    wp_images.append(wp_result)
-                    if i == 0:
-                        featured_image_id = wp_result.get("id")
+                # Image 0 : alt_text = keyword exact (requis par Rank Math)
+                alt = keyword if i == 0 else f"{keyword} - Bild {i + 1}"
+                wp_img = upload_to_wordpress_media(img["path"], alt, keyword)
 
-        # ÉTAPE 4 — Injection images espacées
-        print(f"\n[DA] ÉTAPE 4 — Injection images...")
-        article["html_content"] = inject_images_in_html(article["html_content"], wp_images)
+            if wp_img:
+                wp_images.append(wp_img)
+                if i == 0:
+                    featured_image_id = wp_img.get("id")
+
+        print(f"[DA] {len(wp_images)} images uploadées | Featured ID: {featured_image_id}")
+
+        # ÉTAPE 4 — Remplacement placeholders [BILD_1] à [BILD_4]
+        print(f"\n[DA] ÉTAPE 4 — Injection images par placeholders...")
+        article["html_content"] = replace_image_placeholders(article["html_content"], wp_images)
         article["featured_image_id"] = featured_image_id
         article["images"] = wp_images
 
-        # ÉTAPE 5 — Pins Pinterest
+        # ÉTAPE 5 — Pins Pinterest (basé sur l'image featured = index 0)
         print(f"\n[DA] ÉTAPE 5 — Pins Pinterest...")
         base_image = images_data[0]["path"] if images_data and not dry_run else None
         pins = []
@@ -257,7 +261,11 @@ def run(article_path=None, dry_run=False):
         print(f"\n[DA] ✅ Images: {len(wp_images)} | Pins: {len(pins)}/5 | Featured: {featured_image_id}")
 
         if not dry_run:
-            send_telegram(f"🎨 <b>DA</b> — {keyword}\n🖼️ {len(wp_images)} | 📌 {len(pins)}/5")
+            send_telegram(
+                f"🎨 <b>DA</b> — {keyword}\n"
+                f"🖼️ {len(wp_images)} images | 📌 {len(pins)}/5 pins\n"
+                f"🏷️ Featured ID: {featured_image_id}"
+            )
 
     except Exception as e:
         print(f"[DA] ❌ {str(e)}")

@@ -1,6 +1,11 @@
 """
 Rédacteur Agent — Prompt Builder
 Construit le prompt GPT pour générer l'article en allemand natif.
+
+CHANGEMENT v2:
+- GPT place 4 placeholders [BILD_1] à [BILD_4] dans le HTML aux bons endroits.
+- Le Directeur Artistique remplace ces placeholders par les vraies <figure>.
+- Élimine les bugs d'images dupliquées et d'images empilées.
 """
 
 from config import MIN_WORDS, MAX_WORDS, FORBIDDEN_PHRASES
@@ -46,12 +51,24 @@ KRITISCHE REGELN FÜR DEN INHALT:
 
 ⚠️ KEIN H1 IM ARTIKEL — WordPress fügt den Titel automatisch als H1 ein. Beginne direkt mit der Einleitung (normaler Text), dann H2 für die Abschnitte.
 
-⚠️ KEIN BILD AM ANFANG — WordPress zeigt das Hauptbild automatisch. Füge kein Bild am Anfang des Artikels ein.
+⚠️ KEIN BILD AM ANFANG — Das Hauptbild wird von WordPress automatisch angezeigt. Platziere [BILD_1] NACH dem ersten Absatz, NICHT ganz am Anfang.
 
-⚠️ KEYWORD-WIEDERHOLUNG BEGRENZEN — Das Keyword "{keyword}" darf maximal 1x pro 150 Wörter erscheinen. Verwende Synonyme und Variationen:
-- Statt immer "{keyword}" → verwende auch: "Balkonpflanzen im Frühling", "Frühlingsbalkon", "Balkongarten", "Balkonbepflanzung"
+⚠️ KEYWORD-WIEDERHOLUNG BEGRENZEN — Das Keyword "{keyword}" darf maximal 1x pro 150 Wörter erscheinen. Verwende Synonyme und Variationen.
 
-⚠️ KEINE PLATZHALTLER — Schreibe KEINE [INTERNER LINK: xxx] Platzhalter. Wenn du interne Links brauchst, schreibe einfach den Text ohne Link-Markup.
+⚠️ KEINE LINK-PLATZHALTER — Schreibe KEINE [INTERNER LINK: xxx] Platzhalter. Kein Link-Markup im Text.
+
+---
+
+BILDPLATZHALTER-REGELN (KRITISCH — GENAU EINHALTEN):
+Du musst genau 4 Bildplatzhalter im Artikel platzieren:
+  [BILD_1] — Nach dem ersten Einleitungsabsatz (vor dem Inhaltsverzeichnis)
+  [BILD_2] — Nach dem 2. Hauptabschnitt (H2)
+  [BILD_3] — Nach dem 4. Hauptabschnitt (H2)
+  [BILD_4] — Nach dem vorletzten Hauptabschnitt (H2), vor dem FAQ
+
+⚠️ JEDER PLATZHALTER NUR 1x VERWENDEN — niemals [BILD_1] zweimal.
+⚠️ PLATZHALTER NICHT LÖSCHEN oder in Text umwandeln — sie bleiben exakt so: [BILD_1], [BILD_2], [BILD_3], [BILD_4].
+⚠️ MINDESTENS 200 WÖRTER TEXT zwischen zwei aufeinanderfolgenden Platzhaltern.
 
 ---
 
@@ -71,12 +88,21 @@ PFLICHT-SEO-REGELN:
 ---
 
 ARTIKEL-STRUKTUR (Pflicht):
-- Einleitung (150-200 Wörter): Keyword im ersten Satz, persönlicher Ton
-- Inhaltsverzeichnis (einfache HTML-Tabelle mit H2-Links)
-- 4-6 Hauptabschnitte (H2) mit je 1-2 Unterabschnitten (H3)
-- FAQ-Abschnitt (H2) mit 2-3 echten Fragen
-- Fazit (H2, 100-150 Wörter) + Call-to-Action
-- Nach dem Fazit: [NEWSLETTER_BLOCK]
+1. Einleitung (150-200 Wörter): Keyword im ersten Satz, persönlicher Ton
+   [BILD_1]
+2. Inhaltsverzeichnis (einfache HTML-Tabelle mit H2-Links)
+3. 1. Hauptabschnitt (H2) mit je 1-2 Unterabschnitten (H3)
+4. 2. Hauptabschnitt (H2)
+   [BILD_2]
+5. 3. Hauptabschnitt (H2) mit je 1-2 Unterabschnitten (H3)
+6. 4. Hauptabschnitt (H2)
+   [BILD_3]
+7. 5. Hauptabschnitt (H2) mit je 1-2 Unterabschnitten (H3)
+8. 6. Hauptabschnitt (H2) — optional
+   [BILD_4]
+9. FAQ-Abschnitt (H2) mit 2-3 echten Fragen
+10. Fazit (H2, 100-150 Wörter) + Call-to-Action
+11. [NEWSLETTER_BLOCK]
 
 ---
 
@@ -107,10 +133,12 @@ ALT_TEXT_MAIN_IMAGE: [Alt-Text mit exaktem Keyword]
 
 ---ARTIKEL_START---
 
-[Vollständiger HTML-Artikel — OHNE H1, OHNE Bild am Anfang]
+[Vollständiger HTML-Artikel — OHNE H1, OHNE Bild ganz am Anfang]
 Beginne mit: <p>[Einleitungstext...]</p>
+Dann sofort: [BILD_1]
 Dann: [Inhaltsverzeichnis als HTML-Tabelle]
 Dann: <h2>...</h2> für jeden Abschnitt
+Mit [BILD_2], [BILD_3], [BILD_4] an den vorgeschriebenen Stellen.
 
 ---ARTIKEL_END---
 ```
