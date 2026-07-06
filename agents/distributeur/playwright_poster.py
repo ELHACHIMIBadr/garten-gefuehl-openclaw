@@ -4,20 +4,15 @@ Distributeur Agent — Playwright Poster
 Publie des pins Pinterest via navigateur Chromium automatisé (sans API officielle).
 Headless sur VPS, avec gestion session cookies, retry 3x, anti-detection.
 
-Flux par compte :
-  1. Charger cookies session → skip login si toujours valide
-  2. Sinon login email/password → sauvegarder cookies
-  3. Naviguer vers de.pinterest.com/pin-creation-tool/
-  4. Uploader image → Titre → Description (hashtags) → Lien → Tags (sans #) → Board → Publier
-  5. Vérifier succès → retourner résultat
-
-Selectors vérifiés sur l'interface Pinterest DE (juillet 2026) :
-  - Titre       : placeholder "Erzähle allen, worum es bei deinem Pin geht."
-  - Description : placeholder "Beschreibe deinen Pin"
-  - Lien        : placeholder "Link hinzufügen"
-  - Tags        : placeholder "Nach einem Tag suchen"
-  - Board       : section "Pinnwand"
-  - Publier     : bouton "Veröffentlichen"
+Selectors vérifiés live sur Pinterest DE (juillet 2026) :
+  - Titre       : placeholder "Erzähle allen, worum es bei deinem Pin geht." | id:storyboard-selector-title
+  - Description : data-test-id="storyboard-description-field-container" (après upload)
+  - Lien        : id="WebsiteField"
+  - Tags        : id="combobox-storyboard-interest-tags"
+  - Board open  : data-test-id="board-dropdown-select-button"
+  - Board items : apparaissent après clic (chercher par texte)
+  - Publier     : data-test-id="storyboard-draft-footer-save-recommended-content"
+                  ou bouton "Veröffentlichen"
 """
 
 import os
@@ -61,7 +56,6 @@ NICHE_TAGS = {
     ],
 }
 
-# ── Description avec hashtags (champ "Beschreibung") ─────────
 NICHE_HASHTAGS = {
     "Blumen":        "#Blumen #Gartenblumen #Frühlingsgarten #Pflanzen #Blumengarten",
     "Balkon":        "#Balkon #Balkonpflanzen #Balkonideen #Stadtgarten #Balkondeko",
@@ -126,8 +120,8 @@ def _delay(min_ms: int = 500, max_ms: int = 1500):
 def _is_logged_in(page) -> bool:
     try:
         page.goto("https://www.pinterest.com/", timeout=15000)
-        page.wait_for_load_state("networkidle", timeout=10000)
-        _delay(1000, 2000)
+        page.wait_for_load_state("domcontentloaded", timeout=10000)
+        _delay(1500, 2500)
         login_btn = page.query_selector('[data-test-id="simple-login-button"]')
         return login_btn is None
     except Exception:
@@ -138,7 +132,7 @@ def _login(page, email: str, password: str) -> bool:
     print(f"[Playwright] 🔐 Login Pinterest — {email[:20]}...")
     try:
         page.goto("https://www.pinterest.com/login/", timeout=20000)
-        page.wait_for_load_state("networkidle", timeout=10000)
+        page.wait_for_load_state("domcontentloaded", timeout=10000)
         _delay(1500, 3000)
 
         email_field = page.wait_for_selector('input[id="email"]', timeout=10000)
@@ -153,8 +147,8 @@ def _login(page, email: str, password: str) -> bool:
         pass_field.fill(password)
         _delay(800, 1500)
 
-        # Soumettre et attendre la navigation complète
-        with page.expect_navigation(timeout=15000, wait_until="networkidle"):
+        # Soumettre et attendre la navigation
+        with page.expect_navigation(timeout=15000, wait_until="domcontentloaded"):
             pass_field.press("Enter")
 
         _delay(2000, 3000)
@@ -163,14 +157,13 @@ def _login(page, email: str, password: str) -> bool:
         print(f"[Playwright] URL après login : {current_url[:80]}")
 
         if "security" in current_url or "challenge" in current_url:
-            print(f"[Playwright] ⚠️ Challenge de sécurité détecté — skip")
+            print(f"[Playwright] ⚠️ Challenge de sécurité — skip")
             return False
 
         if "login" not in current_url and "pinterest.com" in current_url:
             print(f"[Playwright] ✅ Login réussi")
             return True
 
-        # Vérifier erreur visible
         try:
             error = page.query_selector('[data-test-id="error-message"]')
             if error:
@@ -183,7 +176,6 @@ def _login(page, email: str, password: str) -> bool:
         return True
 
     except PWTimeoutError:
-        # Navigation timeout peut arriver si la page ne navigue pas (erreur credentials)
         try:
             current_url = page.url
             if "login" not in current_url and "pinterest.com" in current_url:
@@ -201,34 +193,84 @@ def _login(page, email: str, password: str) -> bool:
 # ── Sélection board ──────────────────────────────────────────
 
 def _select_board(page, board_name: str) -> bool:
+    """
+    Ouvre le dropdown board et sélectionne par nom de texte.
+    Après clic sur board-dropdown-select-button, Pinterest charge
+    les options dynamiquement — on attend leur apparition.
+    """
     try:
-        board_section = page.query_selector('[data-test-id="board-dropdown-select-button"]')
-        if not board_section:
-            board_section = page.get_by_text("Pinnwand").first
-        if not board_section:
-            print(f"[Playwright] ⚠️ Section Pinnwand introuvable")
-            return False
+        # Ouvrir le dropdown
+        btn = page.wait_for_selector(
+            '[data-test-id="board-dropdown-select-button"]',
+            timeout=8000
+        )
+        btn.click()
+        _delay(1500, 2500)
 
-        board_section.click()
-        _delay(1000, 2000)
+        # Attendre que les options du dropdown soient chargées
+        # Elles apparaissent dans une liste après le clic
+        try:
+            page.wait_for_selector(
+                '[data-test-id="board-dropdown-item"], [data-test-id="boardWithoutSection"]',
+                timeout=5000
+            )
+        except Exception:
+            pass
 
-        board_options = page.query_selector_all('[data-test-id="board-row"]')
-        for option in board_options:
-            text = option.inner_text()
-            if board_name.lower() in text.lower():
-                option.click()
+        # Chercher le board par nom dans tous les éléments cliquables du dropdown
+        # Pinterest utilise différents selectors selon la version
+        selectors_to_try = [
+            '[data-test-id="board-dropdown-item"]',
+            '[data-test-id="boardWithoutSection"]',
+            '[data-test-id="board-row"]',
+            '[role="option"]',
+            '[role="menuitem"]',
+        ]
+
+        for selector in selectors_to_try:
+            options = page.query_selector_all(selector)
+            if not options:
+                continue
+            for option in options:
+                try:
+                    text = option.inner_text()
+                    if board_name.lower() in text.lower():
+                        option.click()
+                        _delay(500, 1000)
+                        print(f"[Playwright] ✅ Board sélectionné : {board_name}")
+                        return True
+                except Exception:
+                    continue
+
+        # Fallback : chercher par texte directement dans la page
+        try:
+            option = page.get_by_role("option", name=board_name)
+            if option.count() > 0:
+                option.first.click()
                 _delay(500, 1000)
-                print(f"[Playwright] ✅ Board sélectionné : {board_name}")
+                print(f"[Playwright] ✅ Board sélectionné via role : {board_name}")
+                return True
+        except Exception:
+            pass
+
+        # Dernier fallback : dump les options trouvées et prendre la première
+        for selector in selectors_to_try:
+            options = page.query_selector_all(selector)
+            if options:
+                first_text = options[0].inner_text()[:40].strip()
+                options[0].click()
+                _delay(500, 1000)
+                print(f"[Playwright] ⚠️ Board '{board_name}' non trouvé → premier dispo : '{first_text}'")
                 return True
 
-        if board_options:
-            first_name = board_options[0].inner_text()[:40].strip()
-            board_options[0].click()
-            _delay(500, 1000)
-            print(f"[Playwright] ⚠️ Board '{board_name}' non trouvé → '{first_name}'")
-            return True
-
-        print(f"[Playwright] ❌ Aucun board trouvé")
+        # Debug : afficher ce qui est visible dans le dropdown
+        visible = page.evaluate("""
+            () => [...document.querySelectorAll('[data-test-id]')]
+                  .filter(el => el.offsetParent !== null)
+                  .map(el => el.getAttribute('data-test-id'))
+                  .filter(id => id && id.includes('board'))
+        """)
+        print(f"[Playwright] ❌ Board introuvable. data-test-ids board visibles : {visible[:10]}")
         return False
 
     except Exception as e:
@@ -240,9 +282,10 @@ def _select_board(page, board_name: str) -> bool:
 
 def _add_tags(page, tags: list) -> bool:
     try:
-        tag_field = page.query_selector('[placeholder="Nach einem Tag suchen"]')
+        # Utiliser l'id vérifié en live
+        tag_field = page.query_selector('#combobox-storyboard-interest-tags')
         if not tag_field:
-            tag_field = page.query_selector('[data-test-id="pin-draft-topic-tags"] input')
+            tag_field = page.query_selector('[placeholder="Nach einem Tag suchen"]')
         if not tag_field:
             print(f"[Playwright] ⚠️ Champ tags non trouvé — skippé")
             return False
@@ -252,11 +295,11 @@ def _add_tags(page, tags: list) -> bool:
             tag_field.click()
             _delay(200, 400)
             tag_field.fill(tag)
-            _delay(600, 1000)
+            _delay(700, 1200)
 
             try:
                 suggestion = page.wait_for_selector(
-                    '[data-test-id="tag-autocomplete-option"]',
+                    '[data-test-id="tag-autocomplete-option"], [role="option"]',
                     timeout=2000
                 )
                 if suggestion:
@@ -344,20 +387,23 @@ def post_pin(
 
             # ── 2. Pin creation tool ──────────────────────────
             print(f"[Playwright] 🎨 Ouverture pin-creation-tool...")
-            page.goto("https://de.pinterest.com/pin-creation-tool/", timeout=20000)
-            page.wait_for_load_state("networkidle", timeout=15000)
-            _delay(2000, 3000)
+            page.goto("https://de.pinterest.com/pin-creation-tool/", timeout=30000)
+            page.wait_for_load_state("domcontentloaded", timeout=15000)
+            _delay(3000, 5000)
 
             # ── 3. Upload image ───────────────────────────────
             print(f"[Playwright] 📤 Upload : {Path(image_path).name}")
-            file_input = page.wait_for_selector('input[type="file"]', timeout=10000)
+            file_input = page.wait_for_selector(
+                'input[data-test-id="storyboard-upload-input"], input[type="file"]',
+                timeout=10000
+            )
             file_input.set_input_files(image_path)
-            _delay(3000, 5000)
+            _delay(4000, 6000)
 
             # ── 4. Titre ──────────────────────────────────────
             print(f"[Playwright] ✍️ Titre : {title[:50]}...")
             title_field = page.wait_for_selector(
-                '[placeholder="Erzähle allen, worum es bei deinem Pin geht."]',
+                '#storyboard-selector-title, [placeholder="Erzähle allen, worum es bei deinem Pin geht."]',
                 timeout=10000
             )
             title_field.click()
@@ -365,26 +411,35 @@ def post_pin(
             title_field.fill(title[:100])
             _delay(500, 1000)
 
-            # ── 5. Description ────────────────────────────────
+            # ── 5. Description (dans l'éditeur riche) ─────────
             print(f"[Playwright] 📝 Description...")
             try:
-                desc_field = page.wait_for_selector(
-                    '[placeholder="Beschreibe deinen Pin"]',
+                # L'éditeur de description est un div contenteditable dans storyboard-description-field-container
+                desc_container = page.wait_for_selector(
+                    '[data-test-id="storyboard-description-field-container"]',
                     timeout=5000
                 )
-                desc_field.click()
-                _delay(200, 500)
-                desc_field.fill(description[:500])
-                _delay(400, 800)
-            except Exception:
-                print(f"[Playwright] ⚠️ Champ description non trouvé — skippé")
+                # Chercher l'éditeur à l'intérieur
+                desc_editor = desc_container.query_selector(
+                    '[contenteditable="true"], [data-test-id="editor-with-mentions"], textarea'
+                )
+                if desc_editor:
+                    desc_editor.click()
+                    _delay(200, 500)
+                    desc_editor.fill(description[:500])
+                    _delay(400, 800)
+                    print(f"[Playwright] ✅ Description remplie")
+                else:
+                    print(f"[Playwright] ⚠️ Éditeur description non trouvé dans container")
+            except Exception as e:
+                print(f"[Playwright] ⚠️ Description skippée : {e}")
 
             # ── 6. Lien ───────────────────────────────────────
             if link:
                 print(f"[Playwright] 🔗 Lien : {link[:60]}...")
                 try:
                     link_field = page.wait_for_selector(
-                        '[placeholder="Link hinzufügen"]',
+                        '#WebsiteField, [placeholder="Link hinzufügen"]',
                         timeout=8000
                     )
                     link_field.click()
@@ -408,12 +463,20 @@ def post_pin(
 
             # ── 9. Publier ────────────────────────────────────
             print(f"[Playwright] 🚀 Publication...")
-            try:
-                publish_btn = page.wait_for_selector(
-                    'button[data-test-id="board-dropdown-save-button"]',
-                    timeout=8000
-                )
-            except PWTimeoutError:
+            publish_btn = None
+            for selector in [
+                '[data-test-id="storyboard-draft-footer-save-recommended-content"]',
+                'button[data-test-id="board-dropdown-save-button"]',
+            ]:
+                try:
+                    publish_btn = page.wait_for_selector(selector, timeout=5000)
+                    if publish_btn:
+                        break
+                except Exception:
+                    continue
+
+            if not publish_btn:
+                # Fallback : bouton "Veröffentlichen" par texte
                 publish_btn = page.get_by_role("button", name="Veröffentlichen").first
 
             publish_btn.click()
@@ -428,11 +491,11 @@ def post_pin(
             else:
                 try:
                     page.wait_for_selector(
-                        '[data-test-id="pin-success-toast"], [data-test-id="toast"]',
-                        timeout=4000
+                        '[data-test-id="pin-success-toast"], [data-test-id="toast"], [data-test-id="saving-status-created"]',
+                        timeout=5000
                     )
                     result["success"] = True
-                    print(f"[Playwright] ✅ Pin publié (toast détecté)")
+                    print(f"[Playwright] ✅ Pin publié (confirmation détectée)")
                 except Exception:
                     error_el = page.query_selector('[data-test-id="error-message"]')
                     if error_el:
