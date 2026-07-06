@@ -72,14 +72,12 @@ NICHE_HASHTAGS = {
 
 
 def build_description(categorie: str, title: str) -> str:
-    """Description Pinterest = titre + hashtags."""
     hashtags = NICHE_HASHTAGS.get(categorie, "#Garten #Gartenideen")
     intro = f"✨ {title[:80]}" if title else f"Entdecke Ideen rund um {categorie}"
     return f"{intro}\n\n{hashtags}\n\n🌱 Mehr auf garten-gefühl.de"
 
 
 def get_tags_for_niche(categorie: str) -> list:
-    """Retourne la liste de tags (sans #) pour la niche."""
     return NICHE_TAGS.get(categorie, ["Garten", "Gartenideen"])
 
 
@@ -128,6 +126,7 @@ def _delay(min_ms: int = 500, max_ms: int = 1500):
 def _is_logged_in(page) -> bool:
     try:
         page.goto("https://www.pinterest.com/", timeout=15000)
+        page.wait_for_load_state("networkidle", timeout=10000)
         _delay(1000, 2000)
         login_btn = page.query_selector('[data-test-id="simple-login-button"]')
         return login_btn is None
@@ -139,6 +138,7 @@ def _login(page, email: str, password: str) -> bool:
     print(f"[Playwright] 🔐 Login Pinterest — {email[:20]}...")
     try:
         page.goto("https://www.pinterest.com/login/", timeout=20000)
+        page.wait_for_load_state("networkidle", timeout=10000)
         _delay(1500, 3000)
 
         email_field = page.wait_for_selector('input[id="email"]', timeout=10000)
@@ -153,27 +153,44 @@ def _login(page, email: str, password: str) -> bool:
         pass_field.fill(password)
         _delay(800, 1500)
 
-        pass_field.press("Enter")
-        _delay(3000, 5000)
+        # Soumettre et attendre la navigation complète
+        with page.expect_navigation(timeout=15000, wait_until="networkidle"):
+            pass_field.press("Enter")
+
+        _delay(2000, 3000)
 
         current_url = page.url
-        if "login" not in current_url and "pinterest.com" in current_url:
-            print(f"[Playwright] ✅ Login réussi")
-            return True
+        print(f"[Playwright] URL après login : {current_url[:80]}")
 
         if "security" in current_url or "challenge" in current_url:
             print(f"[Playwright] ⚠️ Challenge de sécurité détecté — skip")
             return False
 
-        error = page.query_selector('[data-test-id="error-message"]')
-        if error:
-            print(f"[Playwright] ❌ Erreur login : {error.inner_text()[:100]}")
-            return False
+        if "login" not in current_url and "pinterest.com" in current_url:
+            print(f"[Playwright] ✅ Login réussi")
+            return True
+
+        # Vérifier erreur visible
+        try:
+            error = page.query_selector('[data-test-id="error-message"]')
+            if error:
+                print(f"[Playwright] ❌ Erreur login : {error.inner_text()[:100]}")
+                return False
+        except Exception:
+            pass
 
         print(f"[Playwright] ⚠️ Login incertain → {current_url[:60]}")
         return True
 
     except PWTimeoutError:
+        # Navigation timeout peut arriver si la page ne navigue pas (erreur credentials)
+        try:
+            current_url = page.url
+            if "login" not in current_url and "pinterest.com" in current_url:
+                print(f"[Playwright] ✅ Login réussi (navigation rapide)")
+                return True
+        except Exception:
+            pass
         print(f"[Playwright] ❌ Timeout login")
         return False
     except Exception as e:
@@ -184,14 +201,9 @@ def _login(page, email: str, password: str) -> bool:
 # ── Sélection board ──────────────────────────────────────────
 
 def _select_board(page, board_name: str) -> bool:
-    """
-    Clique sur la section Pinnwand et sélectionne le board par nom.
-    """
     try:
-        # Cliquer sur la section Pinnwand (déjà visible)
         board_section = page.query_selector('[data-test-id="board-dropdown-select-button"]')
         if not board_section:
-            # Fallback : chercher par texte "Pinnwand"
             board_section = page.get_by_text("Pinnwand").first
         if not board_section:
             print(f"[Playwright] ⚠️ Section Pinnwand introuvable")
@@ -200,7 +212,6 @@ def _select_board(page, board_name: str) -> bool:
         board_section.click()
         _delay(1000, 2000)
 
-        # Chercher le board dans la liste
         board_options = page.query_selector_all('[data-test-id="board-row"]')
         for option in board_options:
             text = option.inner_text()
@@ -210,15 +221,14 @@ def _select_board(page, board_name: str) -> bool:
                 print(f"[Playwright] ✅ Board sélectionné : {board_name}")
                 return True
 
-        # Si non trouvé → premier board dispo
         if board_options:
             first_name = board_options[0].inner_text()[:40].strip()
             board_options[0].click()
             _delay(500, 1000)
-            print(f"[Playwright] ⚠️ Board '{board_name}' non trouvé → sélection : '{first_name}'")
+            print(f"[Playwright] ⚠️ Board '{board_name}' non trouvé → '{first_name}'")
             return True
 
-        print(f"[Playwright] ❌ Aucun board trouvé dans le dropdown")
+        print(f"[Playwright] ❌ Aucun board trouvé")
         return False
 
     except Exception as e:
@@ -229,30 +239,22 @@ def _select_board(page, board_name: str) -> bool:
 # ── Ajout des tags ───────────────────────────────────────────
 
 def _add_tags(page, tags: list) -> bool:
-    """
-    Ajoute les tags dans le champ 'Markierte Themen' (sans #).
-    Chaque tag est tapé puis validé avec Enter.
-    """
     try:
-        # Chercher le champ tags par placeholder
         tag_field = page.query_selector('[placeholder="Nach einem Tag suchen"]')
         if not tag_field:
-            # Fallback par data-test-id
             tag_field = page.query_selector('[data-test-id="pin-draft-topic-tags"] input')
         if not tag_field:
             print(f"[Playwright] ⚠️ Champ tags non trouvé — skippé")
             return False
 
         tags_added = 0
-        for tag in tags[:6]:  # Max 6 tags Pinterest
+        for tag in tags[:6]:
             tag_field.click()
             _delay(200, 400)
             tag_field.fill(tag)
             _delay(600, 1000)
 
-            # Attendre suggestion et valider avec Enter
             try:
-                # Essayer de cliquer sur la première suggestion
                 suggestion = page.wait_for_selector(
                     '[data-test-id="tag-autocomplete-option"]',
                     timeout=2000
@@ -265,7 +267,6 @@ def _add_tags(page, tags: list) -> bool:
             except Exception:
                 pass
 
-            # Sinon valider avec Enter directement
             tag_field.press("Enter")
             _delay(300, 500)
             tags_added += 1
@@ -275,7 +276,7 @@ def _add_tags(page, tags: list) -> bool:
 
     except Exception as e:
         print(f"[Playwright] ⚠️ Erreur ajout tags: {e}")
-        return False  # Non bloquant
+        return False
 
 
 # ── Post pin principal ───────────────────────────────────────
@@ -292,12 +293,6 @@ def post_pin(
     link: str = None,
     headless: bool = True,
 ) -> dict:
-    """
-    Publie un pin Pinterest via Playwright.
-
-    Returns:
-        {"success": bool, "pin_url": str | None, "error": str | None}
-    """
     result = {"success": False, "pin_url": None, "error": None}
 
     with sync_playwright() as p:
@@ -350,7 +345,8 @@ def post_pin(
             # ── 2. Pin creation tool ──────────────────────────
             print(f"[Playwright] 🎨 Ouverture pin-creation-tool...")
             page.goto("https://de.pinterest.com/pin-creation-tool/", timeout=20000)
-            _delay(2000, 4000)
+            page.wait_for_load_state("networkidle", timeout=15000)
+            _delay(2000, 3000)
 
             # ── 3. Upload image ───────────────────────────────
             print(f"[Playwright] 📤 Upload : {Path(image_path).name}")
@@ -369,8 +365,8 @@ def post_pin(
             title_field.fill(title[:100])
             _delay(500, 1000)
 
-            # ── 5. Description (avec hashtags) ────────────────
-            print(f"[Playwright] 📝 Description + hashtags...")
+            # ── 5. Description ────────────────────────────────
+            print(f"[Playwright] 📝 Description...")
             try:
                 desc_field = page.wait_for_selector(
                     '[placeholder="Beschreibe deinen Pin"]',
@@ -400,11 +396,11 @@ def post_pin(
                 except PWTimeoutError:
                     print(f"[Playwright] ⚠️ Champ lien non trouvé — pin sans lien")
 
-            # ── 7. Tags (Markierte Themen — sans #) ──────────
+            # ── 7. Tags ───────────────────────────────────────
             tags = get_tags_for_niche(categorie)
             _add_tags(page, tags)
 
-            # ── 8. Board (Pinnwand) ───────────────────────────
+            # ── 8. Board ──────────────────────────────────────
             board_ok = _select_board(page, board_name)
             if not board_ok:
                 result["error"] = f"Board '{board_name}' introuvable"
@@ -418,7 +414,6 @@ def post_pin(
                     timeout=8000
                 )
             except PWTimeoutError:
-                # Fallback : bouton "Veröffentlichen"
                 publish_btn = page.get_by_role("button", name="Veröffentlichen").first
 
             publish_btn.click()
@@ -431,7 +426,6 @@ def post_pin(
                 result["pin_url"] = current_url
                 print(f"[Playwright] ✅ Pin publié : {current_url[:80]}")
             else:
-                # Chercher toast de succès
                 try:
                     page.wait_for_selector(
                         '[data-test-id="pin-success-toast"], [data-test-id="toast"]',
@@ -440,7 +434,6 @@ def post_pin(
                     result["success"] = True
                     print(f"[Playwright] ✅ Pin publié (toast détecté)")
                 except Exception:
-                    # Pas d'erreur visible → considérer comme succès
                     error_el = page.query_selector('[data-test-id="error-message"]')
                     if error_el:
                         result["error"] = f"Erreur Pinterest: {error_el.inner_text()[:100]}"
