@@ -7,8 +7,9 @@ Usage:
     python main.py --article path/to/article.json
     python main.py --dry-run
 
-Cron:
-    0 8 * * * cd /root/garten-gefuehl-openclaw/agents/publisher && /usr/bin/python3 main.py
+Priorité de statut :
+    1. "ready_to_publish"  → DA a terminé normalement
+    2. "approved"          → DA a crashé avant d'écrire le statut (fallback)
 """
 
 import os
@@ -36,23 +37,45 @@ except ImportError:
 
 
 def get_latest_ready_article() -> tuple:
-    """Trouve le dernier article avec status 'ready_to_publish'."""
+    """
+    Trouve le dernier article publiable.
+    Priorité : "ready_to_publish" > "approved"
+    Cherche d'abord aujourd'hui, puis les jours précédents.
+    """
+    search_dirs = []
+
     today = date.today().isoformat()
-    article_dir = Path(ARTICLES_DIR) / today
+    today_dir = Path(ARTICLES_DIR) / today
+    if today_dir.exists():
+        search_dirs.append(today_dir)
 
-    if not article_dir.exists():
-        all_dirs = sorted(Path(ARTICLES_DIR).iterdir(), reverse=True)
-        if not all_dirs:
-            raise FileNotFoundError("Aucun article trouvé")
-        article_dir = all_dirs[0]
+    # Ajouter les autres jours (au cas où aujourd'hui rien de prêt)
+    for d in sorted(Path(ARTICLES_DIR).iterdir(), reverse=True):
+        if d.is_dir() and d != today_dir:
+            search_dirs.append(d)
 
-    for filepath in sorted(article_dir.glob("article_*.json")):
-        with open(filepath, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        if data.get("status") == "ready_to_publish":
-            return filepath, data
+    # Passe 1 : chercher "ready_to_publish" (statut normal DA terminé)
+    for article_dir in search_dirs:
+        for filepath in sorted(article_dir.glob("article_*.json")):
+            with open(filepath, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if data.get("status") == "ready_to_publish":
+                print(f"[Publisher] ✅ Article trouvé (ready_to_publish) : {filepath.name}")
+                return filepath, data
 
-    raise FileNotFoundError("Aucun article prêt à publier")
+    # Passe 2 : fallback "approved" (DA crashé avant d'écrire le statut)
+    for article_dir in search_dirs:
+        for filepath in sorted(article_dir.glob("article_*.json")):
+            with open(filepath, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if data.get("status") == "approved":
+                print(f"[Publisher] ⚠️ Fallback — article 'approved' utilisé : {filepath.name}")
+                print(f"[Publisher] ⚠️ Le DA a probablement crashé — images manquantes possibles")
+                return filepath, data
+
+    raise FileNotFoundError(
+        "Aucun article prêt à publier (ni 'ready_to_publish' ni 'approved')"
+    )
 
 
 def save_article(filepath: Path, data: dict):
@@ -77,7 +100,6 @@ def send_telegram(message: str):
 
 
 def run(article_path: str = None, dry_run: bool = False):
-    """Exécution principale du Publisher."""
     print("=" * 60)
     print(f"[Publisher] Démarrage — {datetime.now().isoformat()}")
     print("=" * 60)
@@ -100,8 +122,9 @@ def run(article_path: str = None, dry_run: bool = False):
         print(f"[Publisher] Keyword  : {keyword}")
         print(f"[Publisher] Slug     : {article['slug']}")
         print(f"[Publisher] Catégorie: {category}")
+        print(f"[Publisher] Statut   : {data.get('status')}")
 
-        # ÉTAPE 2 — Vérifier articles existants (pour liens internes)
+        # ÉTAPE 2 — Articles existants
         print(f"\n[Publisher] ÉTAPE 2 — Articles existants...")
         published_posts = get_published_posts()
         print(f"[Publisher] {len(published_posts)} articles existants")
@@ -111,12 +134,6 @@ def run(article_path: str = None, dry_run: bool = False):
 
         if dry_run:
             print(f"[Publisher] DRY RUN — Publication simulée")
-            print(f"  Titre    : {article['seo_title']}")
-            print(f"  Slug     : {article['slug']}")
-            print(f"  Catégorie: {category}")
-            print(f"  Mots     : {article.get('word_count', '?')}")
-            print(f"  Images   : {len(article.get('images', []))}")
-
             data["status"] = "published"
             data["publish_result"] = {
                 "post_id": "DRY_RUN",
@@ -133,7 +150,7 @@ def run(article_path: str = None, dry_run: bool = False):
                 print(f"\n[Publisher] ÉTAPE 4 — Ping Google...")
                 ping_google_indexing(publish_result["url"])
 
-            # ÉTAPE 5 — Ajouter à l'historique des sujets
+            # ÉTAPE 5 — Historique sujets
             if HISTORY_AVAILABLE:
                 add_topic_to_history(keyword, category, publish_result["url"])
                 print(f"[Publisher] Sujet ajouté à l'historique")

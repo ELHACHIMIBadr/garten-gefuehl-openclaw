@@ -1,156 +1,125 @@
 """
-Distributeur Agent — State Manager
+Distributeur Agent — State Manager (Playwright)
 
-Gère l'état de chaque compte Pinterest :
-- Date de première utilisation (pour calcul warm-up)
-- Historique des pins postés (évite les doublons)
-- Historique des URLs postées par jour (max 1 pin/URL/jour)
-- Board actif en rotation
+État persistant par compte :
+  - Pins déjà postés (évite doublons)
+  - Rotation des boards (round-robin)
+  - Tracking URLs postées par jour (évite de poster le même lien 2x/jour)
+  - Historique journalier pour rapports
 """
 
 import json
 import os
-from datetime import date, datetime
+from datetime import date
 from pathlib import Path
-from config import STATE_FILE, WARMUP_DAYS, ACCOUNT_CATEGORY_MAP
+from config import STATE_FILE, ACCOUNT_CONFIG
 
 
 def load_state() -> dict:
-    """Charge l'état depuis le fichier JSON."""
     if os.path.exists(STATE_FILE):
         try:
             with open(STATE_FILE, "r", encoding="utf-8") as f:
                 return json.load(f)
         except Exception as e:
-            print(f"[Distributeur] Erreur chargement état: {e}")
+            print(f"[State] Erreur chargement: {e}")
 
-    # État initial
+    return _initial_state()
+
+
+def _initial_state() -> dict:
     return {
         "accounts": {
-            account: {
-                "first_use_date": None,
-                "posted_pins": [],        # Liste des noms de fichiers pins déjà postés
-                "board_index": 0,         # Index du prochain board à utiliser
-                "total_pins_posted": 0
+            cfg["name"]: {
+                "posted_pins":  [],   # Noms de fichiers déjà postés depuis ce compte
+                "board_index":  0,    # Index rotation boards
+                "total_posted": 0,
             }
-            for account in ACCOUNT_CATEGORY_MAP.keys()
+            for cfg in ACCOUNT_CONFIG
         },
-        "daily_url_tracking": {}  # {date: {url: count}}
+        "daily_url_tracking": {},     # {date_iso: {url: count}}
+        "daily_results":      {},     # {date_iso: [...résultats]}
     }
 
 
 def save_state(state: dict):
-    """Sauvegarde l'état dans le fichier JSON."""
     os.makedirs(os.path.dirname(STATE_FILE), exist_ok=True)
     with open(STATE_FILE, "w", encoding="utf-8") as f:
         json.dump(state, f, ensure_ascii=False, indent=2)
 
 
-def is_warmup(account_name: str, state: dict) -> bool:
-    """Retourne True si le compte est encore en phase de warm-up."""
-    acc = state["accounts"].get(account_name, {})
-    first_use = acc.get("first_use_date")
+# ── Boards ───────────────────────────────────────────────────
 
-    if not first_use:
-        return True  # Jamais utilisé = warm-up
-
-    try:
-        first_date = date.fromisoformat(first_use)
-        days_active = (date.today() - first_date).days
-        return days_active < WARMUP_DAYS
-    except:
-        return True
-
-
-def mark_first_use(account_name: str, state: dict):
-    """Marque la première utilisation d'un compte (début warm-up)."""
-    acc = state["accounts"].setdefault(account_name, {
-        "first_use_date": None,
-        "posted_pins": [],
-        "board_index": 0,
-        "total_pins_posted": 0
-    })
-    if not acc.get("first_use_date"):
-        acc["first_use_date"] = date.today().isoformat()
-        print(f"[Distributeur] 🆕 {account_name} — warm-up démarré")
-
-
-def get_next_board(account_name: str, boards: list, state: dict) -> str:
-    """
-    Rotation des boards : retourne le prochain board_id à utiliser.
-    Incrémente l'index pour le prochain appel.
-    """
+def get_next_board_name(account_name: str, boards: list, state: dict) -> str:
+    """Rotation round-robin sur la liste des boards."""
     if not boards:
-        return None
-
-    acc = state["accounts"].get(account_name, {})
+        return ""
+    acc = state["accounts"].setdefault(account_name, {
+        "posted_pins": [], "board_index": 0, "total_posted": 0
+    })
     idx = acc.get("board_index", 0) % len(boards)
-    board_id = boards[idx]
-
-    # Incrémenter pour le prochain pin
+    board = boards[idx]
     acc["board_index"] = (idx + 1) % len(boards)
-    state["accounts"][account_name] = acc
+    return board
 
-    return board_id
 
+# ── Déduplication pins ───────────────────────────────────────
 
 def is_pin_already_posted(pin_filename: str, account_name: str, state: dict) -> bool:
-    """Vérifie si un pin a déjà été posté depuis ce compte."""
     acc = state["accounts"].get(account_name, {})
     return pin_filename in acc.get("posted_pins", [])
 
 
 def mark_pin_as_posted(pin_filename: str, account_name: str, state: dict):
-    """Marque un pin comme posté pour ce compte."""
     acc = state["accounts"].setdefault(account_name, {
-        "first_use_date": None, "posted_pins": [], "board_index": 0, "total_pins_posted": 0
+        "posted_pins": [], "board_index": 0, "total_posted": 0
     })
-    if pin_filename not in acc.get("posted_pins", []):
-        acc.setdefault("posted_pins", []).append(pin_filename)
-        acc["total_pins_posted"] = acc.get("total_pins_posted", 0) + 1
+    posted = acc.setdefault("posted_pins", [])
+    if pin_filename not in posted:
+        posted.append(pin_filename)
+        acc["total_posted"] = acc.get("total_posted", 0) + 1
 
 
-def can_post_url_today(url: str, state: dict, max_per_day: int = 1) -> bool:
+# ── Tracking URLs journalier ─────────────────────────────────
+
+def can_post_url_today(url: str, state: dict, max_per_day: int = 2) -> bool:
     """
-    Vérifie si une URL peut encore être postée aujourd'hui.
-    Règle : max 1 pin/URL/jour (toutes comptes confondus).
+    Max 2 pins/URL/jour (tous comptes confondus).
+    Permet de poster le même article sur 2 comptes différents max.
     """
     if not url:
-        return True  # Pin sans lien → toujours autorisé
-
+        return True
     today = date.today().isoformat()
     daily = state.setdefault("daily_url_tracking", {})
-    today_urls = daily.get(today, {})
-    count = today_urls.get(url, 0)
+    count = daily.get(today, {}).get(url, 0)
     return count < max_per_day
 
 
 def track_url_posted(url: str, state: dict):
-    """Enregistre qu'une URL a été postée aujourd'hui."""
     if not url:
         return
-
     today = date.today().isoformat()
     daily = state.setdefault("daily_url_tracking", {})
     today_urls = daily.setdefault(today, {})
     today_urls[url] = today_urls.get(url, 0) + 1
 
-    # Nettoyer les dates > 7 jours
-    to_delete = [d for d in daily if d < date.today().replace(day=max(1, date.today().day - 7)).isoformat()]
-    for d in to_delete:
-        del daily[d]
+    # Nettoyer les entrées > 7 jours
+    cutoff = date.today().replace(day=max(1, date.today().day - 7)).isoformat()
+    for d in list(daily.keys()):
+        if d < cutoff:
+            del daily[d]
 
 
-def get_warmup_days_remaining(account_name: str, state: dict) -> int:
-    """Retourne le nombre de jours de warm-up restants (0 si terminé)."""
-    acc = state["accounts"].get(account_name, {})
-    first_use = acc.get("first_use_date")
-    if not first_use:
-        return WARMUP_DAYS
+# ── Historique journalier ─────────────────────────────────────
 
-    try:
-        first_date = date.fromisoformat(first_use)
-        days_active = (date.today() - first_date).days
-        return max(0, WARMUP_DAYS - days_active)
-    except:
-        return WARMUP_DAYS
+def record_daily_result(state: dict, results: list):
+    today = date.today().isoformat()
+    state.setdefault("daily_results", {})[today] = [
+        {
+            "account":          r["account"],
+            "posted_with_link": r["posted_with_link"],
+            "posted_no_link":   r["posted_no_link"],
+            "skipped":          r["skipped"],
+            "errors":           r["errors"],
+        }
+        for r in results
+    ]

@@ -1,85 +1,114 @@
 """
-Distributeur Agent — Configuration Pinterest
+Distributeur Agent — Configuration (Playwright)
 
-CONFIGURATION REQUISE dans .env :
-Pour chaque compte Pinterest (5 au total), ajouter dans config/.env :
+CREDENTIALS dans config/.env :
+  PINTEREST_1_EMAIL=blumenliebe@example.com
+  PINTEREST_1_PASSWORD=motdepasse123
+  PINTEREST_2_EMAIL=...
+  PINTEREST_2_PASSWORD=...
+  PINTEREST_3_EMAIL=...
+  PINTEREST_3_PASSWORD=...
+  PINTEREST_4_EMAIL=...
+  PINTEREST_4_PASSWORD=...
+  PINTEREST_5_EMAIL=...
+  PINTEREST_5_PASSWORD=...
 
-  PINTEREST_TOKEN_BLUMENLIEBE=your_access_token
-  PINTEREST_BOARDS_BLUMENLIEBE=board_id1,board_id2,board_id3,board_id4,board_id5,board_id6
-
-  PINTEREST_TOKEN_BALKON=your_access_token
-  PINTEREST_BOARDS_BALKON=board_id1,board_id2,...
-
-  PINTEREST_TOKEN_ROSEN=your_access_token
-  PINTEREST_BOARDS_ROSEN=board_id1,...
-
-  PINTEREST_TOKEN_TERRASSE=your_access_token
-  PINTEREST_BOARDS_TERRASSE=board_id1,...
-
-  PINTEREST_TOKEN_GARTENGEFUHL=your_access_token
-  PINTEREST_BOARDS_GARTENGEFUHL=board_id1,...
-
-COMMENT OBTENIR UN ACCESS TOKEN PINTEREST :
-1. Aller sur https://developers.pinterest.com/apps/
-2. Créer une app → récupérer App ID + App Secret
-3. Utiliser le script setup_pinterest_tokens.py fourni
-4. Ou : https://developers.pinterest.com/tools/oauth-token-generator/ (OAuth 2.0 PKCE)
-5. Scopes requis : boards:read, pins:write, user_accounts:read
-
-COMMENT OBTENIR LES BOARD IDs :
-1. Lancer : python distributeur/main.py --list-boards
-   → Affiche les board IDs de tous les comptes configurés
-   Ou manuellement via : GET https://api.pinterest.com/v5/boards
+BOARDS : noms exacts des boards Pinterest (tels qu'affichés sur le profil).
+         Le bot cherchera le board par nom dans le dropdown.
+         Si non trouvé → sélection du premier board disponible.
 """
 
 import os
 
-# Chemins données
-DATA_DIR = "/root/garten-gefuehl-openclaw/data"
-PINS_DIR = f"{DATA_DIR}/pins"
-STATE_FILE = f"{DATA_DIR}/distributeur_state.json"
+# ── Chemins ──────────────────────────────────────────────────
+DATA_DIR     = "/root/garten-gefuehl-openclaw/data"
+PINS_DIR     = f"{DATA_DIR}/pins"
+ARTICLES_DIR = f"{DATA_DIR}/articles"
+STATE_FILE   = f"{DATA_DIR}/distributeur_state.json"
 
-# API Pinterest
-PINTEREST_API_BASE = "https://api.pinterest.com/v5"
+# ── Règles de distribution ───────────────────────────────────
+PINS_WITH_LINK  = 3   # Pins avec lien vers article WP (par compte/jour)
+PINS_NO_LINK    = 2   # Pins sans lien (par compte/jour)
 
-# Mapping compte → catégorie WP
-ACCOUNT_CATEGORY_MAP = {
-    "Blumenliebe DE":      {"env_token": "PINTEREST_TOKEN_BLUMENLIEBE",    "env_boards": "PINTEREST_BOARDS_BLUMENLIEBE",    "categorie": "Blumen"},
-    "Balkon Ideen DE":     {"env_token": "PINTEREST_TOKEN_BALKON",          "env_boards": "PINTEREST_BOARDS_BALKON",          "categorie": "Balkon"},
-    "Rosenfreude DE":      {"env_token": "PINTEREST_TOKEN_ROSEN",           "env_boards": "PINTEREST_BOARDS_ROSEN",           "categorie": "Rosen"},
-    "Terrasse & Garten DE":{"env_token": "PINTEREST_TOKEN_TERRASSE",        "env_boards": "PINTEREST_BOARDS_TERRASSE",        "categorie": "Terrasse"},
-    "Garten Gefühl":       {"env_token": "PINTEREST_TOKEN_GARTENGEFUHL",    "env_boards": "PINTEREST_BOARDS_GARTENGEFUHL",    "categorie": "Garten Gefühl"},
-}
+# ── Anti-ban : délais en secondes ────────────────────────────
+DELAY_BETWEEN_PINS_MIN     = 45   # Entre 2 pins du même compte
+DELAY_BETWEEN_PINS_MAX     = 120
+DELAY_BETWEEN_ACCOUNTS_MIN = 90   # Entre 2 comptes
+DELAY_BETWEEN_ACCOUNTS_MAX = 240
 
-# Règles de distribution
-WARMUP_DAYS = 4            # Nombre de jours de warm-up par compte
-PINS_PER_DAY_WARMUP = 2   # Pins/jour pendant le warm-up (sans lien)
-PINS_PER_DAY_ACTIVE = 4   # Pins/jour en mode actif (avec lien)
-
-# Anti-ban : délais en secondes entre actions
-DELAY_BETWEEN_PINS_MIN = 90   # Délai min entre 2 pins du même compte
-DELAY_BETWEEN_PINS_MAX = 240  # Délai max entre 2 pins du même compte
-DELAY_BETWEEN_ACCOUNTS_MIN = 120  # Délai min entre comptes
-DELAY_BETWEEN_ACCOUNTS_MAX = 360  # Délai max entre comptes
-
-# Gestion liens intelligente
-MAX_PINS_PER_URL_PER_DAY = 1  # Max 1 pin/jour vers la même URL article
-
-
-def get_account_config(account_name: str) -> dict:
-    """Retourne la configuration (token + boards) pour un compte."""
-    cfg = ACCOUNT_CATEGORY_MAP.get(account_name, {})
-    if not cfg:
-        return {}
-
-    token = os.getenv(cfg["env_token"], "")
-    boards_raw = os.getenv(cfg["env_boards"], "")
-    boards = [b.strip() for b in boards_raw.split(",") if b.strip()] if boards_raw else []
-
-    return {
-        "account_name": account_name,
-        "token": token,
-        "boards": boards,
-        "categorie": cfg["categorie"],
-        "configured": bool(token and boards)
-    }
+# ── Configuration des 5 comptes ──────────────────────────────
+# ORDRE IMPORTANT : correspond aux numéros 1-5 dans .env
+# CROSS-NICHE STRICTEMENT INTERDIT :
+#   chaque compte ne poste QUE des liens de sa propre categorie_wp
+ACCOUNT_CONFIG = [
+    {
+        "name":         "Blumenliebe DE",
+        "categorie":    "Blumen",
+        "email_env":    "PINTEREST_1_EMAIL",
+        "password_env": "PINTEREST_1_PASSWORD",
+        "boards": [
+            "Blumen Ideen",
+            "Gartenblumen",
+            "Frühlingsblumen",
+            "Balkonblumen",
+            "Wildblumen & Naturblumen",
+            "Schnittblumen & Sträuße",
+        ],
+    },
+    {
+        "name":         "Balkon Ideen DE",
+        "categorie":    "Balkon",
+        "email_env":    "PINTEREST_2_EMAIL",
+        "password_env": "PINTEREST_2_PASSWORD",
+        "boards": [
+            "Balkon Ideen",
+            "Balkonpflanzen",
+            "Balkon Deko",
+            "Kleiner Balkon",
+            "Balkon Sommer",
+            "Balkon Gemüse & Kräuter",
+        ],
+    },
+    {
+        "name":         "Rosenfreude DE",
+        "categorie":    "Rosen",
+        "email_env":    "PINTEREST_3_EMAIL",
+        "password_env": "PINTEREST_3_PASSWORD",
+        "boards": [
+            "Rosen Ideen",
+            "Rosenpflege",
+            "Kletterrosen",
+            "Rosensorten",
+            "Rosengarten Gestaltung",
+            "Rosen & Romantik",
+        ],
+    },
+    {
+        "name":         "Terrasse & Garten DE",
+        "categorie":    "Terrasse",
+        "email_env":    "PINTEREST_4_EMAIL",
+        "password_env": "PINTEREST_4_PASSWORD",
+        "boards": [
+            "Terrasse Ideen",
+            "Terrassengestaltung",
+            "Gartenmöbel",
+            "Sichtschutz Terrasse",
+            "Terrasse Bepflanzung",
+            "Terrasse & Outdoor Living",
+        ],
+    },
+    {
+        "name":         "Garten Gefühl",
+        "categorie":    "Garten Gefühl",
+        "email_env":    "PINTEREST_5_EMAIL",
+        "password_env": "PINTEREST_5_PASSWORD",
+        "boards": [
+            "Garten Inspiration",
+            "Gartengestaltung",
+            "Naturgarten",
+            "Garten DIY",
+            "Gartenpflege Tipps",
+            "Traumgarten",
+        ],
+    },
+]
