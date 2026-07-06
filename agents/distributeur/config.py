@@ -1,14 +1,7 @@
 """
 Distributeur Agent — Configuration (Playwright)
 
-CREDENTIALS dans config/.env :
-  PINTEREST_1_EMAIL / PINTEREST_1_PASSWORD   → Blumenliebe DE
-  PINTEREST_2_EMAIL / PINTEREST_2_PASSWORD   → Balkon Ideen DE
-  PINTEREST_3_EMAIL / PINTEREST_3_PASSWORD   → Rosenfreude DE
-  PINTEREST_4_EMAIL / PINTEREST_4_PASSWORD   → Terrasse & Garten DE
-  PINTEREST_5_EMAIL / PINTEREST_5_PASSWORD   → Garten Gefühl
-
-BOARDS : noms exacts tels qu'ils apparaissent sur Pinterest.
+Boards vérifiés live sur chaque compte Pinterest (juillet 2026).
 """
 
 import os
@@ -26,7 +19,6 @@ DELAY_BETWEEN_PINS_MAX     = 120
 DELAY_BETWEEN_ACCOUNTS_MIN = 90
 DELAY_BETWEEN_ACCOUNTS_MAX = 240
 
-# Boards vérifiés live sur chaque compte Pinterest
 ACCOUNT_CONFIG = [
     {
         "name":         "Blumenliebe DE",
@@ -48,12 +40,12 @@ ACCOUNT_CONFIG = [
         "email_env":    "PINTEREST_2_EMAIL",
         "password_env": "PINTEREST_2_PASSWORD",
         "boards": [
-            "Balkon Ideen",
-            "Balkonpflanzen",
             "Balkon Deko",
-            "Kleiner Balkon",
-            "Balkon Sommer",
-            "Balkon Gemüse & Kräuter",
+            "Balkon gemütlich gestalten",
+            "Balkon Sichtschutz",
+            "Balkonpflanzen",
+            "Kleiner Balkon Ideen",
+            "Kräuter auf dem Balkon",
         ],
     },
     {
@@ -62,12 +54,12 @@ ACCOUNT_CONFIG = [
         "email_env":    "PINTEREST_3_EMAIL",
         "password_env": "PINTEREST_3_PASSWORD",
         "boards": [
-            "Rosen Ideen",
-            "Rosenpflege",
+            "Alte Rosensorten",
+            "Beetrosen",
             "Kletterrosen",
-            "Rosensorten",
-            "Rosengarten Gestaltung",
-            "Rosen & Romantik",
+            "Rosen Arrangement",
+            "Rosen im Garten",
+            "Rosen Pflege Tipps",
         ],
     },
     {
@@ -76,12 +68,12 @@ ACCOUNT_CONFIG = [
         "email_env":    "PINTEREST_4_EMAIL",
         "password_env": "PINTEREST_4_PASSWORD",
         "boards": [
-            "Terrasse Ideen",
-            "Terrassengestaltung",
-            "Gartenmöbel",
-            "Sichtschutz Terrasse",
-            "Terrasse Bepflanzung",
-            "Terrasse & Outdoor Living",
+            "Terrasse aus Holz",
+            "Terrasse Beleuchtung",
+            "Terrasse Deko",
+            "Terrasse gemütlich einrichten",
+            "Terrassenmöbel Ideen",
+            "Überdachte Terrasse",
         ],
     },
     {
@@ -90,12 +82,12 @@ ACCOUNT_CONFIG = [
         "email_env":    "PINTEREST_5_EMAIL",
         "password_env": "PINTEREST_5_PASSWORD",
         "boards": [
+            "Garten Deko",
+            "Garten Gestaltung",
             "Garten Inspiration",
-            "Gartengestaltung",
+            "Gartenideen",
+            "Gartenpflanzen",
             "Naturgarten",
-            "Garten DIY",
-            "Gartenpflege Tipps",
-            "Traumgarten",
         ],
     },
 ]
