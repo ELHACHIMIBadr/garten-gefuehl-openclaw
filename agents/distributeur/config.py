@@ -2,6 +2,11 @@
 Distributeur Agent — Configuration (Playwright)
 
 Boards vérifiés live sur chaque compte Pinterest (juillet 2026).
+
+MODE ROUND-ROBIN :
+  Chaque round poste 1 pin par compte (5 pins simultanés).
+  30 minutes entre chaque round.
+  5 rounds = 25 pins en 2h.
 """
 
 import os
@@ -13,11 +18,14 @@ STATE_FILE   = f"{DATA_DIR}/distributeur_state.json"
 
 PINS_WITH_LINK  = 3
 PINS_NO_LINK    = 2
+PINS_PER_ACCOUNT = 5  # 5 rounds total
 
-DELAY_BETWEEN_PINS_MIN     = 45
-DELAY_BETWEEN_PINS_MAX     = 120
-DELAY_BETWEEN_ACCOUNTS_MIN = 90
-DELAY_BETWEEN_ACCOUNTS_MAX = 240
+# Délai entre pins du MÊME round (anti-ban inter-comptes, secondes)
+DELAY_BETWEEN_ACCOUNTS_MIN = 30
+DELAY_BETWEEN_ACCOUNTS_MAX = 60
+
+# Délai entre rounds (secondes) — 30 minutes
+DELAY_BETWEEN_ROUNDS = 30 * 60  # 1800s
 
 ACCOUNT_CONFIG = [
     {

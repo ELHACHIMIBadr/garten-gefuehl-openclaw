@@ -1,35 +1,28 @@
 """
-Distributeur Agent — Main (Playwright)
-Distribution des pins Pinterest sur 5 comptes via navigateur automatisé.
+Distributeur Agent — Main (Playwright) — Mode Round-Robin
 
-RÈGLES DE DISTRIBUTION :
-  ┌─────────────────────────────────────────────────────────┐
-  │  5 pins/jour par compte                                 │
-  │  • 2 pins SANS lien  (contenu niche générique/archivé)  │
-  │  • 3 pins AVEC lien  (articles WP de la même niche)     │
-  │                                                         │
-  │  CROSS-NICHE INTERDIT : chaque compte ne poste jamais   │
-  │  un lien d'une autre niche (ex: jamais Rosen→Terrasse)  │
-  │                                                         │
-  │  Si pas d'article dans la niche : 0 pin avec lien,      │
-  │  on complète avec des pins sans lien uniquement         │
-  └─────────────────────────────────────────────────────────┘
+MODE ROUND-ROBIN :
+  Round 1 (16:00) : 1 pin compte 1 → 1 pin compte 2 → ... → 1 pin compte 5
+  Attente 30 min
+  Round 2 (16:30) : 1 pin compte 1 → ... → 1 pin compte 5
+  ...
+  Round 5 (18:00) : dernier pin pour chaque compte
 
-PRÉREQUIS .env :
-  PINTEREST_1_EMAIL / PINTEREST_1_PASSWORD   → Blumenliebe DE
-  PINTEREST_2_EMAIL / PINTEREST_2_PASSWORD   → Balkon Ideen DE
-  PINTEREST_3_EMAIL / PINTEREST_3_PASSWORD   → Rosenfreude DE
-  PINTEREST_4_EMAIL / PINTEREST_4_PASSWORD   → Terrasse & Garten DE
-  PINTEREST_5_EMAIL / PINTEREST_5_PASSWORD   → Garten Gefühl
+  Total : 25 pins en ~2h, 30 min entre chaque round.
+
+RÈGLES :
+  - 3 pins avec lien + 2 pins sans lien par compte/jour
+  - Cross-niche interdit
+  - Si pas d'article dans la niche : 0 pin avec lien
 
 Usage :
-  python main.py              # Exécution normale
+  python main.py              # Exécution normale (5 rounds × 5 comptes)
   python main.py --dry-run    # Test sans poster
-  python main.py --account 1  # Un seul compte (1-5)
+  python main.py --round 1    # Un seul round (1-5)
+  python main.py --account 1  # Un seul compte tous rounds
 """
 
 import os
-import sys
 import json
 import random
 import time
@@ -43,9 +36,9 @@ load_dotenv("/root/garten-gefuehl-openclaw/config/.env")
 
 from config import (
     PINS_DIR, ARTICLES_DIR, ACCOUNT_CONFIG,
-    PINS_NO_LINK, PINS_WITH_LINK,
-    DELAY_BETWEEN_PINS_MIN, DELAY_BETWEEN_PINS_MAX,
+    PINS_NO_LINK, PINS_WITH_LINK, PINS_PER_ACCOUNT,
     DELAY_BETWEEN_ACCOUNTS_MIN, DELAY_BETWEEN_ACCOUNTS_MAX,
+    DELAY_BETWEEN_ROUNDS,
 )
 from playwright_poster import post_pin_with_retry, build_description
 from state_manager import (
@@ -54,10 +47,12 @@ from state_manager import (
     is_pin_already_posted, mark_pin_as_posted,
     can_post_url_today, track_url_posted,
     record_daily_result,
+    get_daily_pin_count, increment_daily_pin_count,
 )
 
 
 # ── Telegram ──────────────────────────────────────────────────
+
 def send_telegram(msg: str):
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     cid = os.getenv("TELEGRAM_CHAT_ID")
@@ -72,20 +67,13 @@ def send_telegram(msg: str):
             pass
 
 
-# ── Collecte des ressources disponibles ───────────────────────
+# ── Ressources ─────────────────────────────────────────────────
 
 def get_published_articles(categorie: str) -> list:
-    """
-    Retourne tous les articles publiés dans une catégorie WP donnée.
-    Triés du plus récent au plus ancien.
-    Chaque article = {"url": str, "title": str, "date": str}
-    """
     articles_root = Path(ARTICLES_DIR)
     found = []
-
     if not articles_root.exists():
         return found
-
     for date_dir in sorted(articles_root.iterdir(), reverse=True):
         if not date_dir.is_dir():
             continue
@@ -95,62 +83,45 @@ def get_published_articles(categorie: str) -> list:
                     data = json.load(f)
                 if data.get("status") != "published":
                     continue
-                brief = data.get("brief", {})
-                if brief.get("categorie_wp") != categorie:
+                if data.get("brief", {}).get("categorie_wp") != categorie:
                     continue
-                publish = data.get("publish_result", {})
-                url = publish.get("url")
+                url = data.get("publish_result", {}).get("url")
                 title = data.get("article", {}).get("seo_title", "")
                 if url:
-                    found.append({
-                        "url": url,
-                        "title": title,
-                        "date": date_dir.name
-                    })
+                    found.append({"url": url, "title": title, "date": date_dir.name})
             except Exception:
                 continue
-
     return found
 
 
-def get_pins_for_account(account_name: str, categorie: str, state: dict) -> list:
-    """
-    Retourne les pins disponibles (non encore postés depuis ce compte).
-    Scanne tous les dossiers /data/pins/ par date décroissante.
-    """
+def get_pins_for_account(account_name: str, state: dict) -> list:
+    """Retourne les pins non encore postés pour ce compte, triés par date desc."""
     pins_root = Path(PINS_DIR)
     if not pins_root.exists():
         return []
 
     account_slug = (
-        account_name
-        .replace(" ", "_")
-        .replace("&", "und")
-        .replace("ü", "u")
-        .replace("Ü", "U")
+        account_name.replace(" ", "_").replace("&", "und")
+        .replace("ü", "u").replace("Ü", "U")
     )
 
     available = []
     for date_dir in sorted(pins_root.iterdir(), reverse=True):
         if not date_dir.is_dir():
             continue
-        for pin_file in date_dir.glob(f"pin_*_{account_slug}.webp"):
+        for pin_file in sorted(date_dir.glob(f"pin_*_{account_slug}*.webp")):
             filename = pin_file.name
             if is_pin_already_posted(filename, account_name, state):
                 continue
-            article_url = _find_article_url(date_dir.name, categorie)
             available.append({
                 "path": str(pin_file),
                 "filename": filename,
-                "article_url": article_url,
                 "date": date_dir.name,
             })
-
     return available
 
 
 def _find_article_url(date_str: str, categorie: str):
-    """Trouve l'URL de l'article publié à cette date pour cette catégorie."""
     article_dir = Path(ARTICLES_DIR) / date_str
     if not article_dir.exists():
         return None
@@ -167,219 +138,252 @@ def _find_article_url(date_str: str, categorie: str):
     return None
 
 
-# ── Logique principale par compte ─────────────────────────────
+# ── Préparer le plan journalier ────────────────────────────────
 
-def run_account(account_idx: int, state: dict, dry_run: bool = False) -> dict:
+def build_daily_plan(state: dict) -> dict:
     """
-    Exécute les 5 pins pour un compte.
-    Retourne un résumé {account, posted_no_link, posted_with_link, skipped, errors}.
+    Construit le plan de la journée : pour chaque compte, liste ordonnée
+    de 5 pins avec/sans lien.
+    Stocké dans state["daily_plan"] pour persistance entre rounds.
     """
-    cfg          = ACCOUNT_CONFIG[account_idx]
-    account_name = cfg["name"]
-    categorie    = cfg["categorie"]
-    email        = os.getenv(cfg["email_env"], "")
-    password     = os.getenv(cfg["password_env"], "")
+    today = date.today().isoformat()
 
-    result = {
-        "account":          account_name,
-        "categorie":        categorie,
-        "posted_no_link":   0,
-        "posted_with_link": 0,
-        "skipped":          0,
-        "errors":           [],
-    }
+    # Si plan déjà construit aujourd'hui → le réutiliser
+    existing = state.get("daily_plan", {})
+    if existing.get("date") == today:
+        return existing
 
-    print(f"\n{'─'*60}")
-    print(f"[Distributeur] 📌 {account_name} (niche: {categorie})")
-    print(f"{'─'*60}")
+    plan = {"date": today, "accounts": {}}
 
-    if not email or not password:
-        msg = f"Credentials manquants ({cfg['email_env']} / {cfg['password_env']})"
-        print(f"[Distributeur] ❌ {msg}")
-        result["errors"].append(msg)
-        return result
+    for cfg in ACCOUNT_CONFIG:
+        account_name = cfg["name"]
+        categorie = cfg["categorie"]
 
-    # ── Ressources disponibles ────────────────────────────────
-    available_pins     = get_pins_for_account(account_name, categorie, state)
-    published_articles = get_published_articles(categorie)
+        pins_available = get_pins_for_account(account_name, state)
+        articles = get_published_articles(categorie)
 
-    print(f"[Distributeur] Pins disponibles : {len(available_pins)}")
-    print(f"[Distributeur] Articles {categorie} publiés : {len(published_articles)}")
+        # Déterminer combien de pins avec/sans lien
+        with_link_target = PINS_WITH_LINK if articles else 0
+        no_link_target = PINS_NO_LINK + (PINS_WITH_LINK - with_link_target)
 
-    # ── Plan : 3 avec lien + 2 sans lien ─────────────────────
-    pins_with_link_target = PINS_WITH_LINK if published_articles else 0
-    pins_no_link_target   = PINS_NO_LINK + (PINS_WITH_LINK - pins_with_link_target)
+        # File d'articles (max 2 fois le même URL/jour)
+        article_queue = []
+        for art in articles:
+            if can_post_url_today(art["url"], state):
+                article_queue.append(art)
+            if len(article_queue) >= with_link_target:
+                break
 
-    print(f"[Distributeur] Plan : {pins_with_link_target} avec lien + {pins_no_link_target} sans lien")
+        actual_with_link = len(article_queue)
+        actual_no_link = no_link_target + (with_link_target - actual_with_link)
 
-    # File des articles (max 2 pins/URL/jour tous comptes confondus)
-    article_queue = []
-    for art in published_articles:
-        if can_post_url_today(art["url"], state):
-            article_queue.append(art)
-        if len(article_queue) >= pins_with_link_target:
-            break
+        # Assigner pins aux slots
+        random.shuffle(pins_available)
+        pin_cursor = 0
+        slots = []
 
-    actual_with_link = len(article_queue)
-    actual_no_link   = pins_no_link_target + (pins_with_link_target - actual_with_link)
+        for art in article_queue:
+            if pin_cursor >= len(pins_available):
+                break
+            pin = pins_available[pin_cursor]; pin_cursor += 1
+            board = get_next_board_name(account_name, cfg["boards"], state)
+            slots.append({
+                "pin_path": pin["path"],
+                "pin_filename": pin["filename"],
+                "link": art["url"],
+                "title": art["title"] or f"Garten Tipps – {categorie}",
+                "board": board,
+                "posted": False,
+            })
 
-    random.shuffle(available_pins)
-    pin_pool   = available_pins.copy()
-    pin_cursor = 0
+        for _ in range(actual_no_link):
+            if pin_cursor >= len(pins_available):
+                break
+            pin = pins_available[pin_cursor]; pin_cursor += 1
+            board = get_next_board_name(account_name, cfg["boards"], state)
+            slots.append({
+                "pin_path": pin["path"],
+                "pin_filename": pin["filename"],
+                "link": None,
+                "title": f"Garten Inspiration – {categorie}",
+                "board": board,
+                "posted": False,
+            })
 
-    # ── Plan d'exécution ─────────────────────────────────────
-    execution_plan = []
+        # Mélanger pour entremêler avec/sans lien
+        random.shuffle(slots)
+        plan["accounts"][account_name] = slots
 
-    for art in article_queue:
-        if pin_cursor >= len(pin_pool):
-            print(f"[Distributeur] ⚠️ Pins épuisés pour {account_name}")
-            break
-        pin   = pin_pool[pin_cursor]; pin_cursor += 1
-        board = get_next_board_name(account_name, cfg["boards"], state)
-        execution_plan.append({
-            "pin":   pin,
-            "link":  art["url"],
-            "title": art["title"] or f"Garten Tipps – {categorie}",
-            "board": board,
-        })
+    state["daily_plan"] = plan
+    save_state(state)
+    return plan
 
-    for _ in range(actual_no_link):
-        if pin_cursor >= len(pin_pool):
-            break
-        pin   = pin_pool[pin_cursor]; pin_cursor += 1
-        board = get_next_board_name(account_name, cfg["boards"], state)
-        execution_plan.append({
-            "pin":   pin,
-            "link":  None,
-            "title": f"Garten Inspiration – {categorie}",
-            "board": board,
-        })
 
-    random.shuffle(execution_plan)
-    print(f"[Distributeur] Plan final : {len(execution_plan)} pins à poster")
+# ── Exécuter un round ──────────────────────────────────────────
 
-    # ── Exécution ─────────────────────────────────────────────
-    for i, item in enumerate(execution_plan):
-        pin   = item["pin"]
-        link  = item["link"]
-        board = item["board"]
-        title = item["title"][:100]
-        desc  = build_description(categorie, title)
+def run_round(round_num: int, state: dict, dry_run: bool = False,
+              only_account_idx: int = None) -> dict:
+    """
+    Exécute le round N : poste 1 pin par compte.
+    round_num : 0-based (0 = round 1)
+    """
+    plan = build_daily_plan(state)
+    round_results = {"round": round_num + 1, "posted": 0, "skipped": 0, "errors": []}
 
-        link_label = f"🔗 {link[:50]}..." if link else "🚫 sans lien"
-        print(f"\n[Distributeur] Pin {i+1}/{len(execution_plan)} | {link_label}")
-        print(f"[Distributeur] Image : {pin['filename']} | Board : {board}")
+    print(f"\n{'='*60}")
+    print(f"[Distributeur] 🔄 ROUND {round_num + 1}/{PINS_PER_ACCOUNT} — {datetime.now().strftime('%H:%M:%S')}")
+    print(f"{'='*60}")
+
+    account_indices = list(range(len(ACCOUNT_CONFIG)))
+    if only_account_idx is not None:
+        account_indices = [only_account_idx]
+    else:
+        random.shuffle(account_indices)
+
+    for pos, idx in enumerate(account_indices):
+        cfg = ACCOUNT_CONFIG[idx]
+        account_name = cfg["name"]
+        categorie = cfg["categorie"]
+        email = os.getenv(cfg["email_env"], "")
+        password = os.getenv(cfg["password_env"], "")
+
+        account_slots = plan["accounts"].get(account_name, [])
+
+        # Trouver le prochain slot non posté
+        slot = None
+        slot_idx = None
+        not_posted = [(i, s) for i, s in enumerate(account_slots) if not s.get("posted")]
+        if not not_posted:
+            print(f"[Distributeur] ⏭️ {account_name} — plus de pins à poster")
+            continue
+        slot_idx, slot = not_posted[0]
+
+        print(f"\n[Distributeur] 📌 {account_name}")
+        link_label = f"🔗 {slot['link'][:50]}..." if slot["link"] else "🚫 sans lien"
+        print(f"[Distributeur] {link_label} | Board : {slot['board']}")
+        print(f"[Distributeur] Image : {slot['pin_filename']}")
 
         if dry_run:
-            print(f"[Distributeur] DRY RUN — simulé ✅")
-            if link:
-                result["posted_with_link"] += 1
-            else:
-                result["posted_no_link"] += 1
+            print(f"[Distributeur] DRY RUN ✅")
+            plan["accounts"][account_name][slot_idx]["posted"] = True
+            round_results["posted"] += 1
             continue
 
-        if i > 0:
-            delay = random.randint(DELAY_BETWEEN_PINS_MIN, DELAY_BETWEEN_PINS_MAX)
-            print(f"[Distributeur] ⏱️ Anti-ban : {delay}s...")
-            time.sleep(delay)
+        if not email or not password:
+            print(f"[Distributeur] ❌ Credentials manquants")
+            round_results["errors"].append(f"{account_name}: credentials manquants")
+            continue
+
+        desc = build_description(categorie, slot["title"])
 
         post_result = post_pin_with_retry(
             account_name=account_name,
             email=email,
             password=password,
-            image_path=pin["path"],
-            title=title,
+            image_path=slot["pin_path"],
+            title=slot["title"][:100],
             description=desc,
-            board_name=board,
+            board_name=slot["board"],
             categorie=categorie,
-            link=link,
+            link=slot["link"],
             max_retries=3,
             headless=True,
         )
 
         if post_result["success"]:
-            mark_pin_as_posted(pin["filename"], account_name, state)
-            if link:
-                track_url_posted(link, state)
-                result["posted_with_link"] += 1
-            else:
-                result["posted_no_link"] += 1
+            plan["accounts"][account_name][slot_idx]["posted"] = True
+            mark_pin_as_posted(slot["pin_filename"], account_name, state)
+            if slot["link"]:
+                track_url_posted(slot["link"], state)
+            state["daily_plan"] = plan
             save_state(state)
+            round_results["posted"] += 1
+            print(f"[Distributeur] ✅ Pin posté")
         else:
             err = post_result.get("error", "erreur inconnue")
-            result["errors"].append(f"Pin {i+1}: {err}")
-            result["skipped"] += 1
-            print(f"[Distributeur] ⚠️ Pin skippé : {err}")
+            round_results["errors"].append(f"{account_name}: {err}")
+            round_results["skipped"] += 1
+            print(f"[Distributeur] ⚠️ Skippé : {err}")
 
-    return result
+        # Délai anti-ban entre comptes
+        if pos < len(account_indices) - 1 and not dry_run:
+            delay = random.randint(DELAY_BETWEEN_ACCOUNTS_MIN, DELAY_BETWEEN_ACCOUNTS_MAX)
+            print(f"[Distributeur] ⏱️ {delay}s avant prochain compte...")
+            time.sleep(delay)
+
+    return round_results
 
 
-# ── Orchestrateur ─────────────────────────────────────────────
+# ── Orchestrateur principal ────────────────────────────────────
 
-def run(dry_run: bool = False, only_account: int = None):
+def run(dry_run: bool = False, only_account: int = None, only_round: int = None):
     print("=" * 60)
     print(f"[Distributeur] 🚀 Démarrage — {datetime.now().isoformat()}")
     print(f"[Distributeur] Mode : {'DRY RUN' if dry_run else 'PRODUCTION'}")
     print("=" * 60)
 
-    state   = load_state()
-    indices = list(range(len(ACCOUNT_CONFIG)))
+    state = load_state()
+    only_account_idx = (only_account - 1) if only_account is not None else None
 
-    if only_account is not None:
-        indices = [only_account - 1]
+    # Déterminer les rounds à exécuter
+    if only_round is not None:
+        rounds_to_run = [only_round - 1]  # --round 1 → index 0
     else:
-        random.shuffle(indices)
-
-    print(f"[Distributeur] Ordre : {[ACCOUNT_CONFIG[i]['name'] for i in indices]}")
+        rounds_to_run = list(range(PINS_PER_ACCOUNT))
 
     all_results = []
-    for pos, idx in enumerate(indices):
-        result = run_account(idx, state, dry_run)
+
+    for r_idx, round_num in enumerate(rounds_to_run):
+        result = run_round(round_num, state, dry_run, only_account_idx)
         all_results.append(result)
 
-        if pos < len(indices) - 1 and not dry_run:
-            delay = random.randint(DELAY_BETWEEN_ACCOUNTS_MIN, DELAY_BETWEEN_ACCOUNTS_MAX)
-            print(f"\n[Distributeur] ⏱️ Pause inter-compte : {delay}s...")
-            time.sleep(delay)
+        # Rapport Telegram par round
+        if not dry_run and len(rounds_to_run) > 1:
+            send_telegram(
+                f"🔄 <b>Round {round_num + 1}/{PINS_PER_ACCOUNT}</b>\n"
+                f"✅ {result['posted']} pins postés\n"
+                f"⚠️ {result['skipped']} skippés"
+            )
 
-    total_with = sum(r["posted_with_link"] for r in all_results)
-    total_no   = sum(r["posted_no_link"]   for r in all_results)
-    total_err  = sum(len(r["errors"])      for r in all_results)
+        # Attendre 30 min avant le prochain round (sauf le dernier)
+        if r_idx < len(rounds_to_run) - 1 and not dry_run:
+            next_time = datetime.fromtimestamp(time.time() + DELAY_BETWEEN_ROUNDS)
+            print(f"\n[Distributeur] ⏳ Prochain round à {next_time.strftime('%H:%M:%S')} (30 min)...")
+            time.sleep(DELAY_BETWEEN_ROUNDS)
+
+    # Résumé final
+    total_posted = sum(r["posted"] for r in all_results)
+    total_skipped = sum(r["skipped"] for r in all_results)
+    total_errors = sum(len(r["errors"]) for r in all_results)
 
     print(f"\n{'='*60}")
-    print(f"[Distributeur] RÉSUMÉ")
-    print(f"  🔗 Pins avec lien  : {total_with}")
-    print(f"  📷 Pins sans lien  : {total_no}")
-    print(f"  ❌ Erreurs         : {total_err}")
-    for r in all_results:
-        ok = "✅" if (r["posted_with_link"] + r["posted_no_link"]) > 0 else "⚠️"
-        print(f"  {ok} {r['account']} : {r['posted_with_link']}🔗 + {r['posted_no_link']}📷")
+    print(f"[Distributeur] RÉSUMÉ FINAL")
+    print(f"  ✅ Postés  : {total_posted}")
+    print(f"  ⚠️ Skippés : {total_skipped}")
+    print(f"  ❌ Erreurs : {total_errors}")
     print(f"{'='*60}")
 
     if not dry_run:
         record_daily_result(state, all_results)
         save_state(state)
-
-        lines = [f"📌 <b>Distributeur Pinterest</b> — {date.today().isoformat()}"]
-        lines.append(f"🔗 Avec lien : <b>{total_with}</b> pins")
-        lines.append(f"📷 Sans lien : <b>{total_no}</b> pins")
-        lines.append("")
-        for r in all_results:
-            icon = "✅" if (r["posted_with_link"] + r["posted_no_link"]) > 0 else "⚠️"
-            lines.append(f"{icon} {r['account']} : {r['posted_with_link']}🔗 + {r['posted_no_link']}📷")
-        if total_err > 0:
-            lines.append(f"\n⚠️ {total_err} erreur(s) — logs VPS")
-
-        send_telegram("\n".join(lines))
+        send_telegram(
+            f"📌 <b>Distributeur Pinterest — Terminé</b>\n"
+            f"📅 {date.today().isoformat()}\n"
+            f"✅ {total_posted}/25 pins postés\n"
+            f"⚠️ {total_skipped} skippés"
+        )
 
 
 # ── CLI ───────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Distributeur Pinterest — Playwright")
+    parser = argparse.ArgumentParser(description="Distributeur Pinterest — Round-Robin")
     parser.add_argument("--dry-run", action="store_true", help="Test sans poster")
     parser.add_argument("--account", type=int, choices=range(1, 6),
-                        help="Exécuter un seul compte (1=Blumenliebe … 5=Garten Gefühl)")
+                        help="Un seul compte (1-5)")
+    parser.add_argument("--round", type=int, choices=range(1, 6),
+                        help="Un seul round (1-5)")
     args = parser.parse_args()
 
-    run(dry_run=args.dry_run, only_account=args.account)
+    run(dry_run=args.dry_run, only_account=args.account,
+        only_round=getattr(args, "round", None))

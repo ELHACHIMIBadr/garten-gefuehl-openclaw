@@ -1,11 +1,5 @@
 """
 Distributeur Agent — State Manager (Playwright)
-
-État persistant par compte :
-  - Pins déjà postés (évite doublons)
-  - Rotation des boards (round-robin)
-  - Tracking URLs postées par jour (évite de poster le même lien 2x/jour)
-  - Historique journalier pour rapports
 """
 
 import json
@@ -22,7 +16,6 @@ def load_state() -> dict:
                 return json.load(f)
         except Exception as e:
             print(f"[State] Erreur chargement: {e}")
-
     return _initial_state()
 
 
@@ -30,14 +23,16 @@ def _initial_state() -> dict:
     return {
         "accounts": {
             cfg["name"]: {
-                "posted_pins":  [],   # Noms de fichiers déjà postés depuis ce compte
-                "board_index":  0,    # Index rotation boards
+                "posted_pins":  [],
+                "board_index":  0,
                 "total_posted": 0,
             }
             for cfg in ACCOUNT_CONFIG
         },
-        "daily_url_tracking": {},     # {date_iso: {url: count}}
-        "daily_results":      {},     # {date_iso: [...résultats]}
+        "daily_url_tracking": {},
+        "daily_results":      {},
+        "daily_plan":         {},
+        "daily_pin_counts":   {},
     }
 
 
@@ -50,7 +45,6 @@ def save_state(state: dict):
 # ── Boards ───────────────────────────────────────────────────
 
 def get_next_board_name(account_name: str, boards: list, state: dict) -> str:
-    """Rotation round-robin sur la liste des boards."""
     if not boards:
         return ""
     acc = state["accounts"].setdefault(account_name, {
@@ -82,10 +76,6 @@ def mark_pin_as_posted(pin_filename: str, account_name: str, state: dict):
 # ── Tracking URLs journalier ─────────────────────────────────
 
 def can_post_url_today(url: str, state: dict, max_per_day: int = 2) -> bool:
-    """
-    Max 2 pins/URL/jour (tous comptes confondus).
-    Permet de poster le même article sur 2 comptes différents max.
-    """
     if not url:
         return True
     today = date.today().isoformat()
@@ -101,25 +91,28 @@ def track_url_posted(url: str, state: dict):
     daily = state.setdefault("daily_url_tracking", {})
     today_urls = daily.setdefault(today, {})
     today_urls[url] = today_urls.get(url, 0) + 1
-
-    # Nettoyer les entrées > 7 jours
     cutoff = date.today().replace(day=max(1, date.today().day - 7)).isoformat()
     for d in list(daily.keys()):
         if d < cutoff:
             del daily[d]
 
 
+# ── Compteurs journaliers par compte ─────────────────────────
+
+def get_daily_pin_count(account_name: str, state: dict) -> int:
+    today = date.today().isoformat()
+    return state.setdefault("daily_pin_counts", {}).get(today, {}).get(account_name, 0)
+
+
+def increment_daily_pin_count(account_name: str, state: dict):
+    today = date.today().isoformat()
+    counts = state.setdefault("daily_pin_counts", {})
+    today_counts = counts.setdefault(today, {})
+    today_counts[account_name] = today_counts.get(account_name, 0) + 1
+
+
 # ── Historique journalier ─────────────────────────────────────
 
 def record_daily_result(state: dict, results: list):
     today = date.today().isoformat()
-    state.setdefault("daily_results", {})[today] = [
-        {
-            "account":          r["account"],
-            "posted_with_link": r["posted_with_link"],
-            "posted_no_link":   r["posted_no_link"],
-            "skipped":          r["skipped"],
-            "errors":           r["errors"],
-        }
-        for r in results
-    ]
+    state.setdefault("daily_results", {})[today] = results
