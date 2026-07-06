@@ -146,7 +146,6 @@ def _wait_for_form_ready(page):
     """Attend que le formulaire soit activé après upload image."""
     print("[Playwright] ⏳ Attente activation formulaire...")
     try:
-        # Attendre que le titre soit éditable
         page.wait_for_function(
             """() => {
                 const t = document.querySelector('#storyboard-selector-title');
@@ -157,7 +156,6 @@ def _wait_for_form_ready(page):
         print("[Playwright] ✅ Formulaire prêt")
         _delay(1000, 2000)
     except Exception:
-        # Fallback : attendre le board dropdown
         try:
             page.wait_for_function(
                 """() => {
@@ -182,38 +180,28 @@ def _fill_title(page, title):
         _delay(300, 500)
         field.fill(title[:100])
         _delay(400, 800)
-        print(f"[Playwright] ✅ Titre rempli")
+        print("[Playwright] ✅ Titre rempli")
     except Exception as e:
         print(f"[Playwright] ⚠️ Titre skippé : {e}")
 
 
 def _fill_description(page, description):
-    """
-    La description Pinterest est un éditeur riche (div contenteditable ProseMirror).
-    On clique sur le container puis on utilise keyboard.type().
-    """
     try:
-        # Cliquer sur le container de description pour le focus
         container = page.wait_for_selector(
             '[data-test-id="storyboard-description-field-container"]',
             timeout=8000
         )
         container.click()
         _delay(500, 800)
-
-        # Chercher l'éditeur actif dans le container
         editor = container.query_selector(
             'div[role="textbox"], [contenteditable="true"], p[data-placeholder]'
         )
         if editor:
             editor.click()
             _delay(300, 500)
-
-        # Taper avec keyboard.type (fonctionne sur tous les éditeurs riches)
         page.keyboard.type(description[:500], delay=8)
         _delay(400, 700)
         print("[Playwright] ✅ Description remplie")
-
     except Exception as e:
         print(f"[Playwright] ⚠️ Description skippée : {e}")
 
@@ -229,7 +217,7 @@ def _fill_link(page, link):
         _delay(500, 1000)
         field.press("Tab")
         _delay(800, 1500)
-        print(f"[Playwright] ✅ Lien ajouté")
+        print("[Playwright] ✅ Lien ajouté")
     except Exception as e:
         print(f"[Playwright] ⚠️ Lien skippé : {e}")
 
@@ -242,7 +230,6 @@ def _fill_tags(page, tags):
         if not field:
             print("[Playwright] ⚠️ Champ tags non trouvé")
             return
-
         added = 0
         for tag in tags[:6]:
             field.click()
@@ -264,9 +251,7 @@ def _fill_tags(page, tags):
             field.press("Enter")
             _delay(300, 500)
             added += 1
-
         print(f"[Playwright] ✅ {added} tags ajoutés")
-
     except Exception as e:
         print(f"[Playwright] ⚠️ Tags : {e}")
 
@@ -285,21 +270,13 @@ def _select_board(page, board_name):
         btn.click()
         _delay(2000, 3000)
 
-        # Chercher les options du dropdown (Pinterest utilise li[role="option"])
-        selectors = [
-            'li[role="option"]',
-            'div[role="option"]',
-            '[data-test-id*="board-dropdown-item"]',
-            '[data-test-id*="boardWithout"]',
-        ]
+        # Selector confirmé live : data-test-id="boardWithoutSection"
+        options = page.query_selector_all('[data-test-id="boardWithoutSection"]')
 
-        for sel in selectors:
-            options = page.query_selector_all(sel)
-            if not options:
-                continue
+        if options:
             for opt in options:
                 try:
-                    text = opt.inner_text()
+                    text = opt.inner_text().strip()
                     if board_name.lower() in text.lower():
                         opt.click()
                         _delay(500, 1000)
@@ -307,25 +284,36 @@ def _select_board(page, board_name):
                         return True
                 except Exception:
                     continue
-            # Non trouvé mais options existent → prendre premier
+            # Non trouvé → premier dispo
             try:
-                first_text = options[0].inner_text()[:30]
+                first_text = options[0].inner_text().strip()[:30]
                 options[0].click()
                 _delay(500, 1000)
                 print(f"[Playwright] ⚠️ Board '{board_name}' non trouvé → '{first_text}'")
                 return True
             except Exception:
-                continue
+                pass
 
-        # Dernier fallback : chercher par texte visible
-        visible = page.evaluate("""
-            () => [...document.querySelectorAll('li, [role="option"]')]
-                  .filter(e => e.offsetParent !== null)
-                  .map(e => ({text: e.innerText.trim().substring(0,40), tag: e.tagName}))
-                  .filter(e => e.text.length > 0)
-                  .slice(0, 20)
-        """)
-        print(f"[Playwright] ❌ Board introuvable. Visible : {visible}")
+        # Fallback : data-test-id commençant par "board-row-"
+        options2 = page.query_selector_all('[data-test-id^="board-row-"]')
+        if options2:
+            for opt in options2:
+                try:
+                    text = opt.inner_text().strip()
+                    if board_name.lower() in text.lower():
+                        opt.click()
+                        _delay(500, 1000)
+                        print(f"[Playwright] ✅ Board (board-row) : {board_name}")
+                        return True
+                except Exception:
+                    continue
+            first_text = options2[0].inner_text().strip()[:30]
+            options2[0].click()
+            _delay(500, 1000)
+            print(f"[Playwright] ⚠️ Board fallback → '{first_text}'")
+            return True
+
+        print(f"[Playwright] ❌ Aucune option board trouvée")
         return False
 
     except Exception as e:
@@ -415,7 +403,7 @@ def post_pin(account_name, email, password, image_path, title,
             )
             file_input.set_input_files(image_path)
 
-            # 4. Attendre formulaire prêt (CRITIQUE — tous les champs disabled avant)
+            # 4. Attendre formulaire prêt
             _wait_for_form_ready(page)
 
             # 5. Titre
