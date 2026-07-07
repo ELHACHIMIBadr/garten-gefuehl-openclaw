@@ -1,15 +1,13 @@
 """
 Scout Agent — Main
-Orchestrateur principal. 1 article/jour, rotation sur 5 catégories.
+Orchestrateur principal. 2 articles/jour, rotation sur 5 catégories.
 Zéro intervention humaine, 100% data-driven.
 
 Usage :
-    python main.py              # Exécution normale (catégorie auto par rotation)
+    python main.py              # Exécution normale
     python main.py --category 2 # Forcer une catégorie (0-4)
     python main.py --dry-run    # Test sans sauvegarder
-
-Cron recommandé :
-    0 6 * * * cd /root/garten-gefuehl-openclaw/agents/scout && /usr/bin/python3 main.py
+    python main.py --slot 0     # Slot matin (0) ou après-midi (1)
 """
 
 import os
@@ -32,43 +30,97 @@ from telegram_notify import (
     notify_scout_summary
 )
 
+# Base locale des slugs/keywords publiés
+try:
+    sys.path.insert(0, "/root/garten-gefuehl-openclaw/agents/publisher")
+    from published_slugs import (
+        sync_from_wordpress, is_keyword_published,
+        is_slug_published, get_all_published_keywords
+    )
+    SLUGS_DB_AVAILABLE = True
+except ImportError:
+    SLUGS_DB_AVAILABLE = False
 
-def get_todays_category() -> dict:
+# WordStream scraper pour volumes réels
+try:
+    from wordstream_scraper import get_volumes_for_keywords
+    WORDSTREAM_AVAILABLE = True
+except ImportError:
+    WORDSTREAM_AVAILABLE = False
+
+
+def get_todays_category(slot: int = 0) -> dict:
     day_of_year = date.today().timetuple().tm_yday
-    index = day_of_year % len(CATEGORIES)
+    index = (day_of_year * 2 + slot) % len(CATEGORIES)
     return CATEGORIES[index]
 
 
 def build_synthetic_volumes(keywords_data: dict) -> dict:
-    """
-    Génère des volumes synthétiques quand aucune API de volumes n'est disponible.
-
-    Logique :
-    - Chaque source dans laquelle le keyword apparaît = 100 points de volume
-    - Sources possibles : google, pinterest, faq
-    - Un keyword vu dans 2 sources → volume synthétique = 200
-    - Filtre minimum dans scorer.py est 50 → tous les keywords avec ≥1 source passent
-
-    Quand Google Ads Keyword Planner sera disponible, cette fonction sera remplacée.
-    """
+    """Volumes synthétiques basés sur fréquence multi-sources."""
     synthetic = {}
     for kw_lower, kw_info in keywords_data.items():
         source_count = len(kw_info.get("sources", set()))
-        # Volume synthétique basé sur présence multi-sources
         volume = max(source_count * 100, 50)
-
-        # Bonus FAQ : questions disponibles = intérêt réel
         if kw_info.get("faq"):
             volume += 50
-
         synthetic[kw_lower] = {
             "volume": volume,
-            "cpc": 0.5,               # CPC neutre par défaut
-            "competition": 0.3,       # Concurrence neutre
+            "cpc": 0.5,
+            "competition": 0.3,
             "competition_level": "MEDIUM",
-            "trend": 10               # Trend légèrement positif
+            "trend": 10
         }
     return synthetic
+
+
+def filter_published_keywords(keywords_data: dict) -> dict:
+    """
+    Supprime les keywords déjà publiés de la liste.
+    Vérifie à la fois la base locale et génère le slug pour vérification.
+    """
+    if not SLUGS_DB_AVAILABLE:
+        return keywords_data
+
+    published_keywords = get_all_published_keywords()
+    published_set = set(k.lower().strip() for k in published_keywords)
+
+    filtered = {}
+    removed = 0
+    for kw_lower, kw_info in keywords_data.items():
+        # Vérifier le keyword exact
+        if kw_lower in published_set:
+            removed += 1
+            continue
+        # Vérifier si un keyword très similaire a été publié
+        kw_words = set(kw_lower.split())
+        too_similar = False
+        for published_kw in published_set:
+            pub_words = set(published_kw.split())
+            # Si 80%+ des mots sont communs → trop similaire
+            if len(kw_words) > 0 and len(pub_words) > 0:
+                overlap = len(kw_words & pub_words) / max(len(kw_words), len(pub_words))
+                if overlap >= 0.8:
+                    too_similar = True
+                    break
+        if too_similar:
+            removed += 1
+            continue
+        filtered[kw_lower] = kw_info
+
+    if removed > 0:
+        print(f"[Scout] 🚫 {removed} keywords déjà publiés exclus")
+    return filtered
+
+
+def generate_slug(keyword: str) -> str:
+    """Génère le slug WordPress depuis un keyword."""
+    import re
+    slug = keyword.lower().strip()
+    slug = slug.replace("ä", "ae").replace("ö", "oe").replace("ü", "ue").replace("ß", "ss")
+    slug = re.sub(r"[^a-z0-9\s-]", "", slug)
+    slug = re.sub(r"\s+", "-", slug)
+    slug = re.sub(r"-+", "-", slug)
+    return slug.strip("-")
 
 
 def generate_brief(keyword_data: dict, category: dict, faq_questions: list) -> dict:
@@ -171,19 +223,24 @@ def save_raw_keywords(keywords_data: dict):
     print(f"[Scout] Raw keywords sauvegardés : {filepath}")
 
 
-def run(category_override: int = None, dry_run: bool = False):
+def run(category_override: int = None, dry_run: bool = False, slot: int = 0):
     print("=" * 60)
     print(f"[Scout] Démarrage — {datetime.now().isoformat()}")
     print("=" * 60)
 
     if category_override is not None:
         category = CATEGORIES[category_override]
-        print(f"[Scout] Catégorie forcée : {category['name']} ({category['traduction_fr']})")
+        print(f"[Scout] Catégorie forcée : {category['name']}")
     else:
-        category = get_todays_category()
-        print(f"[Scout] Catégorie du jour : {category['name']} ({category['traduction_fr']})")
+        category = get_todays_category(slot)
+        print(f"[Scout] Catégorie du jour (slot {slot}) : {category['name']}")
 
     try:
+        # ÉTAPE 0 — Synchroniser la base des articles publiés depuis WP
+        if SLUGS_DB_AVAILABLE and not dry_run:
+            print(f"\n[Scout] ÉTAPE 0 — Sync articles publiés...")
+            sync_from_wordpress()
+
         # ÉTAPE 1 — Collecte keywords
         print(f"\n[Scout] ÉTAPE 1 — Collecte des keywords...")
         keywords_data = collect_all_keywords(category["seed_keywords"])
@@ -196,60 +253,80 @@ def run(category_override: int = None, dry_run: bool = False):
         if not dry_run:
             save_raw_keywords(keywords_data)
 
-        # ÉTAPE 2 — Historique
-        print(f"\n[Scout] ÉTAPE 2 — Filtrage...")
+        # ÉTAPE 2 — Filtrer les keywords déjà publiés
+        print(f"\n[Scout] ÉTAPE 2 — Filtrage keywords publiés...")
+        keywords_data = filter_published_keywords(keywords_data)
+
+        if not keywords_data:
+            notify_scout_error(
+                f"Tous les keywords sont déjà publiés pour {category['name']}. "
+                f"Collectés: {total_collected}, tous filtrés."
+            )
+            return
+
+        # ÉTAPE 3 — Historique
+        print(f"\n[Scout] ÉTAPE 3 — Historique...")
         history = load_history()
 
-        # ÉTAPE 3 — Volumes
-        # Essayer Google Ads Keyword Planner si disponible
-        # Sinon fallback sur volumes synthétiques (fréquence multi-sources)
-        print(f"\n[Scout] ÉTAPE 3 — Volumes...")
+        # ÉTAPE 4 — Volumes
+        print(f"\n[Scout] ÉTAPE 4 — Volumes SEO...")
         volumes_data = {}
 
-        google_ads_token = os.getenv("GOOGLE_ADS_DEVELOPER_TOKEN", "")
-        if google_ads_token and google_ads_token != "bW3XwK0grw3xiuQadvLE2g":
-            # Google Ads Keyword Planner (quand accès approuvé)
+        # Essayer WordStream (Playwright)
+        if WORDSTREAM_AVAILABLE:
             try:
-                from google_ads_client import get_keyword_volumes_google_ads
-                keyword_list = [kw_info["original"] for kw_info in keywords_data.values()]
-                volumes_data = get_keyword_volumes_google_ads(keyword_list)
-                print(f"[Scout] ✅ Google Ads — {len(volumes_data)} volumes récupérés")
+                keyword_list = [kw_info.get("original", kw) for kw, kw_info in list(keywords_data.items())[:5]]
+                volumes_data = get_volumes_for_keywords(keyword_list)
+                print(f"[Scout] ✅ WordStream — {len(volumes_data)} volumes récupérés")
             except Exception as e:
-                print(f"[Scout] ⚠️ Google Ads erreur: {e} — fallback synthétique")
+                print(f"[Scout] ⚠️ WordStream erreur: {e} — fallback synthétique")
                 volumes_data = {}
 
         if not volumes_data:
-            print(f"[Scout] ℹ️ Volumes synthétiques (Google Ads en attente d'approbation)")
+            print(f"[Scout] ℹ️ Volumes synthétiques (WordStream indisponible)")
             volumes_data = build_synthetic_volumes(keywords_data)
-            print(f"[Scout] {len(volumes_data)} volumes synthétiques générés")
 
-        # ÉTAPE 4 — Filtrage + scoring
-        print(f"\n[Scout] ÉTAPE 4 — Scoring...")
+        # ÉTAPE 5 — Filtrage + scoring
+        print(f"\n[Scout] ÉTAPE 5 — Scoring...")
         filtered = filter_keywords(keywords_data, volumes_data, history)
 
         if not filtered:
             notify_scout_error(
-                f"Aucun keyword valide après filtrage pour {category['name']}. "
-                f"Collectés: {total_collected}, tous filtrés."
+                f"Aucun keyword valide après filtrage pour {category['name']}."
             )
             return
 
         scored = score_keywords(filtered)
 
-        # ÉTAPE 5 — Sélection
-        print(f"\n[Scout] ÉTAPE 5 — Sélection...")
-        best = select_best_keyword(scored, category["name"])
+        # ÉTAPE 6 — Sélection (en vérifiant le slug)
+        print(f"\n[Scout] ÉTAPE 6 — Sélection...")
+        best = None
+        for candidate in scored:
+            kw = candidate["keyword"]
+            slug = generate_slug(kw)
+            if SLUGS_DB_AVAILABLE and is_slug_published(slug):
+                print(f"[Scout] ⏭️ Slug déjà publié : {slug} — skip")
+                continue
+            if SLUGS_DB_AVAILABLE and is_keyword_published(kw):
+                print(f"[Scout] ⏭️ Keyword déjà publié : {kw} — skip")
+                continue
+            best = candidate
+            break
+
+        if not best:
+            # Fallback : select_best_keyword sans vérification slug
+            best = select_best_keyword(scored, category["name"])
 
         if not best:
             notify_scout_error(f"Impossible de sélectionner un keyword pour {category['name']}")
             return
 
-        print(f"[Scout] Meilleur keyword : {best['keyword']} (score: {best['score']})")
+        print(f"[Scout] ✅ Meilleur keyword : {best['keyword']} (score: {best['score']})")
 
         secondary = find_secondary_keywords(scored, best["keyword"])
 
-        # ÉTAPE 6 — Brief
-        print(f"\n[Scout] ÉTAPE 6 — Génération du brief...")
+        # ÉTAPE 7 — Brief
+        print(f"\n[Scout] ÉTAPE 7 — Génération du brief...")
         brief = generate_brief(best, category, best.get("faq", []))
         brief["keywords_secondaires"] = secondary
 
@@ -281,6 +358,7 @@ def run(category_override: int = None, dry_run: bool = False):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Scout Agent — Garten Gefühl")
     parser.add_argument("--category", type=int, help="Forcer une catégorie (0-4)", default=None)
-    parser.add_argument("--dry-run", action="store_true", help="Test sans sauvegarder")
+    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--slot", type=int, default=0, help="Slot 0=matin, 1=après-midi")
     args = parser.parse_args()
-    run(category_override=args.category, dry_run=args.dry_run)
+    run(category_override=args.category, dry_run=args.dry_run, slot=args.slot)

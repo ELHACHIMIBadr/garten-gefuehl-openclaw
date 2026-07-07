@@ -25,9 +25,7 @@ load_dotenv("/root/garten-gefuehl-openclaw/config/.env")
 sys.path.insert(0, "/root/garten-gefuehl-openclaw/agents")
 
 from config import ARTICLES_DIR, PING_GOOGLE
-from wp_client import (
-    publish_post, ping_google_indexing, get_published_posts
-)
+from wp_client import publish_post, ping_google_indexing, get_published_posts
 
 try:
     from history import add_topic_to_history
@@ -35,26 +33,28 @@ try:
 except ImportError:
     HISTORY_AVAILABLE = False
 
+try:
+    from published_slugs import add_published_article, sync_from_wordpress
+    SLUGS_DB_AVAILABLE = True
+except ImportError:
+    SLUGS_DB_AVAILABLE = False
+
 
 def get_latest_ready_article() -> tuple:
     """
     Trouve le dernier article publiable.
     Priorité : "ready_to_publish" > "approved"
-    Cherche d'abord aujourd'hui, puis les jours précédents.
     """
     search_dirs = []
-
     today = date.today().isoformat()
     today_dir = Path(ARTICLES_DIR) / today
     if today_dir.exists():
         search_dirs.append(today_dir)
 
-    # Ajouter les autres jours (au cas où aujourd'hui rien de prêt)
     for d in sorted(Path(ARTICLES_DIR).iterdir(), reverse=True):
         if d.is_dir() and d != today_dir:
             search_dirs.append(d)
 
-    # Passe 1 : chercher "ready_to_publish" (statut normal DA terminé)
     for article_dir in search_dirs:
         for filepath in sorted(article_dir.glob("article_*.json")):
             with open(filepath, "r", encoding="utf-8") as f:
@@ -63,14 +63,12 @@ def get_latest_ready_article() -> tuple:
                 print(f"[Publisher] ✅ Article trouvé (ready_to_publish) : {filepath.name}")
                 return filepath, data
 
-    # Passe 2 : fallback "approved" (DA crashé avant d'écrire le statut)
     for article_dir in search_dirs:
         for filepath in sorted(article_dir.glob("article_*.json")):
             with open(filepath, "r", encoding="utf-8") as f:
                 data = json.load(f)
             if data.get("status") == "approved":
-                print(f"[Publisher] ⚠️ Fallback — article 'approved' utilisé : {filepath.name}")
-                print(f"[Publisher] ⚠️ Le DA a probablement crashé — images manquantes possibles")
+                print(f"[Publisher] ⚠️ Fallback — article 'approved' : {filepath.name}")
                 return filepath, data
 
     raise FileNotFoundError(
@@ -85,12 +83,12 @@ def save_article(filepath: Path, data: dict):
 
 
 def send_telegram(message: str):
-    import requests
+    import requests as req
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     chat_id = os.getenv("TELEGRAM_CHAT_ID")
     if token and chat_id:
         try:
-            requests.post(
+            req.post(
                 f"https://api.telegram.org/bot{token}/sendMessage",
                 json={"chat_id": chat_id, "text": message, "parse_mode": "HTML"},
                 timeout=10
@@ -145,12 +143,23 @@ def run(article_path: str = None, dry_run: bool = False):
             data["status"] = "published"
             data["publish_result"] = publish_result
 
-            # ÉTAPE 4 — Ping Google
+            # ÉTAPE 4 — Enregistrer dans la base des slugs publiés
+            if SLUGS_DB_AVAILABLE:
+                add_published_article(
+                    slug=article["slug"],
+                    keyword=keyword,
+                    url=publish_result["url"],
+                    categorie=category,
+                    post_id=publish_result.get("post_id")
+                )
+                print(f"[Publisher] ✅ Slug enregistré dans la base locale")
+
+            # ÉTAPE 5 — Ping Google
             if PING_GOOGLE:
-                print(f"\n[Publisher] ÉTAPE 4 — Ping Google...")
+                print(f"\n[Publisher] ÉTAPE 5 — Ping Google...")
                 ping_google_indexing(publish_result["url"])
 
-            # ÉTAPE 5 — Historique sujets
+            # ÉTAPE 6 — Historique sujets
             if HISTORY_AVAILABLE:
                 add_topic_to_history(keyword, category, publish_result["url"])
                 print(f"[Publisher] Sujet ajouté à l'historique")
@@ -184,5 +193,4 @@ if __name__ == "__main__":
     parser.add_argument("--article", type=str, default=None)
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
-
     run(article_path=args.article, dry_run=args.dry_run)
