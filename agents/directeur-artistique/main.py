@@ -1,11 +1,10 @@
 """
 Directeur Artistique Agent — Main
 
-CHANGELOG v3:
-- Fix critique : statut "ready_to_publish" écrit AVANT les pins.
-  Les pins sont indépendants du Publisher — un timeout sur les pins
-  ne bloque plus la publication de l'article.
-- Les pins en échec sont loggés et notifiés Telegram, mais le pipeline continue.
+CHANGELOG v4:
+- Pins générés pour LES 5 NICHES à chaque exécution (pas seulement la niche de l'article).
+  Chaque compte reçoit 5 pins avec son propre keyword niche.
+- Fix critique v3 conservé : statut "ready_to_publish" écrit AVANT les pins.
 """
 
 import os
@@ -18,9 +17,9 @@ from pathlib import Path
 from dotenv import load_dotenv
 load_dotenv("/root/garten-gefuehl-openclaw/config/.env")
 
-from config import ARTICLES_DIR, IMAGES_DIR, PINS_DIR, CATEGORY_IMAGE_KEYWORDS
+from config import ARTICLES_DIR, IMAGES_DIR, PINS_DIR, CATEGORY_IMAGE_KEYWORDS, PINTEREST_ACCOUNTS
 from image_sourcer import fetch_n_images, reset_article_cache
-from pin_creator import create_all_pins
+from pin_creator import create_pins_for_account
 
 import sys
 sys.path.insert(0, "/root/garten-gefuehl-openclaw/agents")
@@ -29,6 +28,17 @@ try:
     HISTORY_AVAILABLE = True
 except ImportError:
     HISTORY_AVAILABLE = False
+
+
+# ── Keyword par niche pour les pins ──────────────────────────
+# Indépendant de l'article du jour — chaque compte a son propre keyword pin
+NICHE_PIN_KEYWORDS = {
+    "Blumenliebe DE":      ("Blumen",        "garten blumen ideen"),
+    "Balkon Ideen DE":     ("Balkon",        "balkon gestalten ideen"),
+    "Rosenfreude DE":      ("Rosen",         "rosen pflanzen pflegen"),
+    "Terrasse & Garten DE":("Terrasse",      "terrasse gestalten tipps"),
+    "Garten Gefühl":       ("Garten Gefühl", "garten inspiration ideen"),
+}
 
 
 def get_latest_approved_article() -> tuple:
@@ -118,13 +128,13 @@ def replace_image_placeholders(html_content: str, images: list) -> str:
         else:
             result += img_html
             injected += 1
-            print(f"[DA] ⚠️ {placeholder} absent — image {i} ajoutée en fin de contenu (fallback)")
+            print(f"[DA] ⚠️ {placeholder} absent — image {i} ajoutée en fin")
     for k in range(1, 6):
         orphan = f"[BILD_{k}]"
         if orphan in result:
             result = result.replace(orphan, "")
             print(f"[DA] 🧹 {orphan} orphelin supprimé")
-    print(f"[DA] {injected}/{len(text_images)} images injectées via placeholders")
+    print(f"[DA] {injected}/{len(text_images)} images injectées")
     return result
 
 
@@ -142,8 +152,51 @@ def send_telegram(msg):
         try:
             requests.post(f"https://api.telegram.org/bot{token}/sendMessage",
                          json={"chat_id": cid, "text": msg, "parse_mode": "HTML"}, timeout=10)
-        except:
+        except Exception:
             pass
+
+
+def generate_all_pins(pins_dir: str, article_title: str, dry_run: bool = False) -> list:
+    """
+    Génère 5 pins pour CHAQUE compte Pinterest (25 pins total).
+    Chaque compte utilise son propre keyword niche — indépendant de l'article du jour.
+    """
+    all_pins = []
+
+    for account_idx, account_name in enumerate(PINTEREST_ACCOUNTS):
+        categorie, keyword = NICHE_PIN_KEYWORDS[account_name]
+        account_slug = (
+            account_name.replace(" ", "_").replace("&", "und")
+            .replace("ü", "u").replace("Ü", "U")
+        )
+
+        print(f"\n[DA] 📌 Pins {account_name} — keyword: {keyword}")
+
+        if dry_run:
+            for v in range(5):
+                all_pins.append({
+                    "path": f"DRY_{account_slug}_v{v+1}",
+                    "account": account_name,
+                    "title": f"DRY {keyword}",
+                    "variation": v + 1,
+                })
+            continue
+
+        try:
+            account_pins = create_pins_for_account(
+                account_name=account_name,
+                account_idx=account_idx,
+                keyword=keyword,
+                categorie=categorie,
+                pins_dir=pins_dir,
+                n_pins=5,
+            )
+            all_pins.extend(account_pins)
+            print(f"[DA] ✅ {len(account_pins)}/5 pins générés — {account_name}")
+        except Exception as e:
+            print(f"[DA] ⚠️ Pins échoués pour {account_name} : {e}")
+
+    return all_pins
 
 
 def run(article_path=None, dry_run=False):
@@ -191,7 +244,7 @@ def run(article_path=None, dry_run=False):
         print(f"[DA] {len(images_data)} images uniques trouvées")
 
         if len(images_data) < 2:
-            raise Exception(f"Pas assez d'images ({len(images_data)}/5) — pipeline arrêté")
+            raise Exception(f"Pas assez d'images ({len(images_data)}/5)")
 
         # ── ÉTAPE 3 — Upload WordPress ────────────────────────
         print(f"\n[DA] ÉTAPE 3 — Upload WordPress...")
@@ -217,47 +270,34 @@ def run(article_path=None, dry_run=False):
         article["featured_image_id"] = featured_image_id
         article["images"] = wp_images
 
-        # ── ÉTAPE 4b — Sauvegarde "ready_to_publish" ICI ─────
-        # CRITIQUE : on écrit le statut avant les pins.
-        # Un timeout sur les pins ne bloquera plus le Publisher.
+        # ── ÉTAPE 4b — Écrire ready_to_publish AVANT les pins ─
         data["article"] = article
-        data["pins"] = []  # Sera mis à jour après, mais Publisher n'a pas besoin des pins
+        data["pins"] = []
         data["status"] = "ready_to_publish"
         save_article(filepath, data, dry_run)
-        print(f"[DA] ✅ Statut 'ready_to_publish' écrit — Publisher peut s'exécuter")
+        print(f"[DA] ✅ Statut 'ready_to_publish' écrit")
 
-        # ── ÉTAPE 5 — Pins Pinterest (non bloquant) ───────────
-        print(f"\n[DA] ÉTAPE 5 — Pins Pinterest...")
-        base_image = images_data[0]["path"] if images_data and not dry_run else None
+        # ── ÉTAPE 5 — Pins pour LES 5 COMPTES (non bloquant) ──
+        print(f"\n[DA] ÉTAPE 5 — Génération 25 pins (5 comptes × 5 variations)...")
         pins = []
-        pins_ok = False
-
         try:
-            if base_image:
-                pins = create_all_pins(base_image, article["seo_title"], keyword, category, pins_dir)
-            else:
-                pins = [{"account": a, "title": article["seo_title"], "path": "DRY"}
-                        for a in ["Blumenliebe DE", "Balkon Ideen DE", "Rosenfreude DE",
-                                  "Terrasse & Garten DE", "Garten Gefühl"]]
-            pins_ok = True
-            print(f"[DA] ✅ {len(pins)}/5 pins générés")
+            pins = generate_all_pins(pins_dir, article["seo_title"], dry_run)
+            print(f"[DA] ✅ {len(pins)}/25 pins générés")
         except Exception as e:
             print(f"[DA] ⚠️ Pins échoués (non bloquant) : {e}")
-            send_telegram(f"⚠️ <b>DA — Pins incomplets</b>\n{keyword}\nErreur pins : {str(e)[:150]}\nArticle prêt à publier malgré tout.")
+            send_telegram(f"⚠️ <b>DA — Pins incomplets</b>\n{keyword}\n{str(e)[:150]}")
 
-        # Mise à jour finale avec les pins (si générés)
         if pins:
             data["pins"] = pins
             save_article(filepath, data, dry_run)
 
-        print(f"\n[DA] ✅ Images: {len(wp_images)} | Pins: {len(pins)}/5 | Featured: {featured_image_id}")
+        print(f"\n[DA] ✅ Images: {len(wp_images)} | Pins: {len(pins)}/25 | Featured: {featured_image_id}")
 
         if not dry_run:
-            pin_status = f"📌 {len(pins)}/5 pins" if pins_ok else "⚠️ Pins échoués"
             send_telegram(
                 f"🎨 <b>DA</b> — {keyword}\n"
-                f"🖼️ {len(wp_images)} images | {pin_status}\n"
-                f"🏷️ Featured ID: {featured_image_id}\n"
+                f"🖼️ {len(wp_images)} images article\n"
+                f"📌 {len(pins)}/25 pins générés\n"
                 f"✅ Prêt pour publication"
             )
 
