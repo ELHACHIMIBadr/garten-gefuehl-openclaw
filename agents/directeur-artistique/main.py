@@ -1,10 +1,13 @@
 """
 Directeur Artistique Agent — Main
 
-CHANGELOG v4:
-- Pins générés pour LES 5 NICHES à chaque exécution (pas seulement la niche de l'article).
-  Chaque compte reçoit 5 pins avec son propre keyword niche.
-- Fix critique v3 conservé : statut "ready_to_publish" écrit AVANT les pins.
+CHANGELOG v6 (fix historique images):
+- seed_image_history_from_wordpress() → utilise add_wp_url_to_history()
+  au lieu de polluer used_source_urls avec des URLs WordPress.
+  Avant : les 175 URLs WP noyaient les URLs Pexels/Pixabay → déduplication inopérante.
+
+CHANGELOG v5 (fix critique pins):
+- ÉTAPE 5 : appel corrigé → create_all_pins() au lieu de create_pins_for_account()
 """
 
 import os
@@ -19,26 +22,15 @@ load_dotenv("/root/garten-gefuehl-openclaw/config/.env")
 
 from config import ARTICLES_DIR, IMAGES_DIR, PINS_DIR, CATEGORY_IMAGE_KEYWORDS, PINTEREST_ACCOUNTS
 from image_sourcer import fetch_n_images, reset_article_cache
-from pin_creator import create_pins_for_account
+from pin_creator import create_all_pins
 
 import sys
 sys.path.insert(0, "/root/garten-gefuehl-openclaw/agents")
 try:
-    from history import load_image_history, save_image_history
+    from history import add_wp_url_to_history
     HISTORY_AVAILABLE = True
 except ImportError:
     HISTORY_AVAILABLE = False
-
-
-# ── Keyword par niche pour les pins ──────────────────────────
-# Indépendant de l'article du jour — chaque compte a son propre keyword pin
-NICHE_PIN_KEYWORDS = {
-    "Blumenliebe DE":      ("Blumen",        "garten blumen ideen"),
-    "Balkon Ideen DE":     ("Balkon",        "balkon gestalten ideen"),
-    "Rosenfreude DE":      ("Rosen",         "rosen pflanzen pflegen"),
-    "Terrasse & Garten DE":("Terrasse",      "terrasse gestalten tipps"),
-    "Garten Gefühl":       ("Garten Gefühl", "garten inspiration ideen"),
-}
 
 
 def get_latest_approved_article() -> tuple:
@@ -58,6 +50,10 @@ def get_latest_approved_article() -> tuple:
 
 
 def seed_image_history_from_wordpress():
+    """
+    Enregistre les URLs WordPress dans used_wp_urls (référence seulement).
+    NE pollue plus used_source_urls — la déduplication Pexels/Pixabay reste intacte.
+    """
     if not HISTORY_AVAILABLE:
         return
     wp_url = os.getenv("WP_URL", "https://xn--garten-gefhl-mlb.de")
@@ -69,14 +65,14 @@ def seed_image_history_from_wordpress():
         resp = requests.get(f"{wp_url}/wp-json/wp/v2/media", auth=(wp_user, wp_password),
                            params={"per_page": 100, "media_type": "image"}, timeout=15)
         if resp.status_code == 200:
-            history = load_image_history()
-            existing = set(history.get("used_urls", []))
-            new = [i["source_url"] for i in resp.json() if i.get("source_url") and i["source_url"] not in existing]
-            existing.update(new)
-            history["used_urls"] = list(existing)
-            save_image_history(history)
-            if new:
-                print(f"[DA] {len(new)} images WP ajoutées à l'historique")
+            added = 0
+            for item in resp.json():
+                src = item.get("source_url", "")
+                if src:
+                    add_wp_url_to_history(src)
+                    added += 1
+            if added:
+                print(f"[DA] {added} URLs WP référencées dans historique (used_wp_urls)")
     except Exception as e:
         print(f"[DA] ⚠️ Sync WP: {e}")
 
@@ -102,6 +98,9 @@ def upload_to_wordpress_media(image_path: str, alt_text: str, keyword: str) -> d
             requests.post(f"{wp_url}/wp-json/wp/v2/media/{mid}", auth=(wp_user, wp_password),
                          json={"alt_text": alt_text}, timeout=10)
             print(f"[DA] Uploadée: ID {mid}")
+            # Référencer l'URL WP dans l'historique (pas pour déduplication)
+            if HISTORY_AVAILABLE:
+                add_wp_url_to_history(media.get("source_url", ""))
             return {"id": mid, "url": media.get("source_url", ""), "alt_text": alt_text}
         print(f"[DA] Erreur upload: {resp.status_code}")
     except Exception as e:
@@ -154,49 +153,6 @@ def send_telegram(msg):
                          json={"chat_id": cid, "text": msg, "parse_mode": "HTML"}, timeout=10)
         except Exception:
             pass
-
-
-def generate_all_pins(pins_dir: str, article_title: str, dry_run: bool = False) -> list:
-    """
-    Génère 5 pins pour CHAQUE compte Pinterest (25 pins total).
-    Chaque compte utilise son propre keyword niche — indépendant de l'article du jour.
-    """
-    all_pins = []
-
-    for account_idx, account_name in enumerate(PINTEREST_ACCOUNTS):
-        categorie, keyword = NICHE_PIN_KEYWORDS[account_name]
-        account_slug = (
-            account_name.replace(" ", "_").replace("&", "und")
-            .replace("ü", "u").replace("Ü", "U")
-        )
-
-        print(f"\n[DA] 📌 Pins {account_name} — keyword: {keyword}")
-
-        if dry_run:
-            for v in range(5):
-                all_pins.append({
-                    "path": f"DRY_{account_slug}_v{v+1}",
-                    "account": account_name,
-                    "title": f"DRY {keyword}",
-                    "variation": v + 1,
-                })
-            continue
-
-        try:
-            account_pins = create_pins_for_account(
-                account_name=account_name,
-                account_idx=account_idx,
-                keyword=keyword,
-                categorie=categorie,
-                pins_dir=pins_dir,
-                n_pins=5,
-            )
-            all_pins.extend(account_pins)
-            print(f"[DA] ✅ {len(account_pins)}/5 pins générés — {account_name}")
-        except Exception as e:
-            print(f"[DA] ⚠️ Pins échoués pour {account_name} : {e}")
-
-    return all_pins
 
 
 def run(article_path=None, dry_run=False):
@@ -277,15 +233,31 @@ def run(article_path=None, dry_run=False):
         save_article(filepath, data, dry_run)
         print(f"[DA] ✅ Statut 'ready_to_publish' écrit")
 
-        # ── ÉTAPE 5 — Pins pour LES 5 COMPTES (non bloquant) ──
+        # ── ÉTAPE 5 — 25 pins via create_all_pins() ──────────
         print(f"\n[DA] ÉTAPE 5 — Génération 25 pins (5 comptes × 5 variations)...")
         pins = []
-        try:
-            pins = generate_all_pins(pins_dir, article["seo_title"], dry_run)
-            print(f"[DA] ✅ {len(pins)}/25 pins générés")
-        except Exception as e:
-            print(f"[DA] ⚠️ Pins échoués (non bloquant) : {e}")
-            send_telegram(f"⚠️ <b>DA — Pins incomplets</b>\n{keyword}\n{str(e)[:150]}")
+        base_image_path = images_data[0].get("path", "") if images_data else ""
+
+        existing_pins = list(Path(pins_dir).glob("pin_*.webp"))
+        if len(existing_pins) >= 25:
+            print(f"[DA] ⏭️ 25 pins déjà présents — génération skippée")
+        else:
+            try:
+                if dry_run:
+                    pins = [{"path": f"DRY_pin_{i}", "account": "dry", "title": keyword, "variation": i} for i in range(25)]
+                    print(f"[DA] DRY RUN — 25 pins simulés")
+                else:
+                    pins = create_all_pins(
+                        base_image_path=base_image_path,
+                        article_title=article.get("seo_title", keyword),
+                        keyword=keyword,
+                        category=category,
+                        pins_dir=pins_dir,
+                    )
+                print(f"[DA] ✅ {len(pins)}/25 pins générés")
+            except Exception as e:
+                print(f"[DA] ⚠️ Pins échoués (non bloquant) : {e}")
+                send_telegram(f"⚠️ <b>DA — Pins incomplets</b>\n{keyword}\n{str(e)[:150]}")
 
         if pins:
             data["pins"] = pins

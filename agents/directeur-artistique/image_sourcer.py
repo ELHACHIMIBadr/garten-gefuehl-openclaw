@@ -1,13 +1,16 @@
 """
 Directeur Artistique Agent — Image Sourcer
 
+CHANGELOG v3 (Fix fond noir):
+- download_and_convert_webp : fond blanc ajouté avant conversion RGBA/P → RGB.
+  Évite le fond noir sur les images PNG transparentes de Pixabay/Pexels.
+
 CHANGELOG v2 (Bug 3 corrigé):
-- Prompt Codex ultra-court et binaire (Blumen/Pflanzen = JA, Gebäude = NEIN).
-- Condition de retour : output.startswith("JA") au lieu de "JA" in output.
-  Évite les faux-positifs ("VIELLEICHT JA", "ICH GLAUBE JA...").
-- Timeout réduit à 30s → NEIN par défaut en cas d'erreur/timeout.
-- MAX_REJECTIONS augmenté à 15 (pool de ~80 candidats disponibles).
-- Anti-doublon par source_id conservé (pool unifié par collect_unique_candidates).
+- Prompt Codex ultra-court et binaire.
+- Condition retour : output.startswith("JA").
+- Timeout réduit à 30s → NEIN par défaut.
+- MAX_REJECTIONS augmenté à 15.
+- Anti-doublon par source_id.
 """
 
 import os
@@ -45,12 +48,28 @@ def reset_article_cache():
 
 
 def download_and_convert_webp(content: bytes, save_path: str, max_kb: int = 200) -> bool:
-    """Convertit les bytes image en WebP < max_kb et sauvegarde."""
+    """Convertit les bytes image en WebP < max_kb et sauvegarde.
+    Fix fond noir : fond blanc appliqué avant conversion pour les PNG transparents.
+    """
     try:
         if PIL_AVAILABLE:
             img = Image.open(io.BytesIO(content))
-            if img.mode in ("RGBA", "P"):
+
+            # Fix fond noir : composer sur fond blanc avant de convertir en RGB
+            if img.mode in ("RGBA", "LA", "P"):
+                background = Image.new("RGB", img.size, (255, 255, 255))
+                if img.mode == "P":
+                    img = img.convert("RGBA")
+                # Utiliser le canal alpha comme masque
+                alpha = img.split()[-1] if img.mode in ("RGBA", "LA") else None
+                if alpha:
+                    background.paste(img.convert("RGB"), mask=alpha)
+                else:
+                    background.paste(img.convert("RGB"))
+                img = background
+            elif img.mode != "RGB":
                 img = img.convert("RGB")
+
             quality = 85
             while quality >= 50:
                 output = io.BytesIO()
@@ -66,7 +85,6 @@ def download_and_convert_webp(content: bytes, save_path: str, max_kb: int = 200)
             img.save(save_path, format="WEBP", quality=75)
             return True
         else:
-            # PIL non disponible — sauvegarde brute
             with open(save_path, "wb") as f:
                 f.write(content)
             return True
@@ -78,15 +96,8 @@ def download_and_convert_webp(content: bytes, save_path: str, max_kb: int = 200)
 def validate_image_with_codex(image_path: str, keyword: str, category: str) -> bool:
     """
     Valide qu'une image est bien une photo de plantes/fleurs via Codex CLI.
-
-    Règles strictes :
-    - JA  = Plantes/fleurs CLAIREMENT en premier plan, pas de bâtiment visible
-    - NEIN = Bâtiment, architecture, balcon vide, paysage urbain, ou incertain
-
     En cas de timeout ou d'erreur → NEIN par défaut (fail-safe).
-    La condition de retour vérifie que la réponse COMMENCE par "JA" (anti-faux-positif).
     """
-    # Prompt ultra-court et binaire — Codex doit répondre JA ou NEIN, rien d'autre
     prompt = (
         "Antworte NUR mit JA oder NEIN — kein anderer Text.\n"
         "JA = Blumen oder Pflanzen sind das klare HAUPTMOTIV im Vordergrund, kein Gebäude sichtbar.\n"
@@ -99,14 +110,11 @@ def validate_image_with_codex(image_path: str, keyword: str, category: str) -> b
             capture_output=True,
             text=True,
             encoding="utf-8",
-            timeout=30  # Réduit à 30s — timeout → NEIN
+            timeout=30
         )
-        # Nettoyer la réponse : prendre le 1er mot uniquement
         output = result.stdout.strip().upper()
         first_word = output.split()[0] if output.split() else "NEIN"
         print(f"[DA] Codex validation: '{first_word}'")
-
-        # Condition stricte : doit commencer par "JA" exactement
         return first_word == "JA"
 
     except subprocess.TimeoutExpired:
@@ -116,7 +124,6 @@ def validate_image_with_codex(image_path: str, keyword: str, category: str) -> b
         print(f"[DA] Codex erreur → NEIN (défaut) : {e}")
         return False
     finally:
-        # Supprimer le fichier temporaire dans tous les cas
         try:
             os.unlink(image_path)
         except:
@@ -124,7 +131,6 @@ def validate_image_with_codex(image_path: str, keyword: str, category: str) -> b
 
 
 def search_pexels(query: str, per_page: int = 10) -> list:
-    """Recherche des images sur Pexels."""
     api_key = os.getenv("PEXELS_API_KEY")
     if not api_key:
         return []
@@ -152,7 +158,6 @@ def search_pexels(query: str, per_page: int = 10) -> list:
 
 
 def search_pixabay(query: str, per_page: int = 10) -> list:
-    """Recherche des images sur Pixabay."""
     api_key = os.getenv("PIXABAY_API_KEY")
     if not api_key:
         return []
@@ -187,39 +192,25 @@ def search_pixabay(query: str, per_page: int = 10) -> list:
 
 
 def collect_unique_candidates(queries: list) -> list:
-    """
-    Collecte des candidats depuis TOUTES les requêtes (Pexels + Pixabay).
-    Déduplique par source_id — élimine les photos populaires qui reviennent
-    dans plusieurs requêtes différentes (cause principale du Bug 1).
-    """
+    """Collecte candidats depuis toutes les requêtes, dédupliqués par source_id."""
     seen_ids = set()
     unique = []
-
     for query in queries:
         for candidate in search_pexels(query, 10) + search_pixabay(query, 10):
             sid = candidate["source_id"]
             if sid not in seen_ids:
                 seen_ids.add(sid)
                 unique.append(candidate)
-
     print(f"[DA] {len(unique)} candidats uniques collectés ({len(queries)} requêtes)")
     return unique
 
 
 def fetch_n_images(queries: list, n: int, img_dir: str, keyword: str, category: str) -> list:
-    """
-    Collecte exactement N images uniques, validées visuellement par Codex.
-
-    Ordre de priorité : Pexels → Pixabay → GPT-image fallback.
-    Anti-doublon : source_id par article (cache local) + historique global.
-    Validation : chaque image passée à Codex CLI — plantes/fleurs uniquement.
-    """
-    # MAX_REJECTIONS augmenté : pool de ~80 candidats disponibles
+    """Collecte exactement N images uniques, validées visuellement par Codex."""
     MAX_REJECTIONS = max(15, n * 3)
     rejected_count = 0
     images = []
 
-    # Étape 1 : collecter tous les candidats uniques depuis toutes les requêtes
     candidates = collect_unique_candidates(queries)
 
     for candidate in candidates:
@@ -232,16 +223,12 @@ def fetch_n_images(queries: list, n: int, img_dir: str, keyword: str, category: 
         sid = candidate["source_id"]
         url = candidate["url"]
 
-        # Filtre 1 : déjà utilisé dans cet article ?
         if sid in _used_source_ids:
             continue
-
-        # Filtre 2 : historique global (inter-articles)
         if HISTORY_AVAILABLE and is_image_already_used(url):
             print(f"[DA] ⏭️ {sid} — déjà utilisé (historique)")
             continue
 
-        # Télécharger l'image
         try:
             resp = requests.get(url, timeout=15)
             if resp.status_code != 200:
@@ -251,7 +238,6 @@ def fetch_n_images(queries: list, n: int, img_dir: str, keyword: str, category: 
             print(f"[DA] Erreur téléchargement {sid}: {e}")
             continue
 
-        # Écrire dans un fichier temp pour Codex
         try:
             with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as f:
                 f.write(content)
@@ -260,7 +246,6 @@ def fetch_n_images(queries: list, n: int, img_dir: str, keyword: str, category: 
             print(f"[DA] Erreur fichier temp: {e}")
             continue
 
-        # Validation Codex (supprime temp_path dans le finally)
         print(f"[DA] Validation {sid} ({candidate['source']})...")
         if validate_image_with_codex(temp_path, keyword, category):
             img_num = len(images) + 1
@@ -271,9 +256,7 @@ def fetch_n_images(queries: list, n: int, img_dir: str, keyword: str, category: 
                 if HISTORY_AVAILABLE:
                     add_image_to_history(url, keyword)
 
-                # Alt text : keyword exact pour l'image 1 (featured), descriptif pour les autres
                 alt_text = keyword if img_num == 1 else f"{keyword} - Bild {img_num}"
-
                 images.append({
                     "path": save_path,
                     "source": candidate["source"],
@@ -298,7 +281,6 @@ def fetch_n_images(queries: list, n: int, img_dir: str, keyword: str, category: 
         try:
             from openai import OpenAI
             client = OpenAI()
-            # Prompt spécifique à la catégorie pour meilleure pertinence
             gpt_prompt = (
                 f"Close-up of beautiful {category.lower()} plants and flowers, "
                 f"lush green leaves, natural daylight, no buildings or architecture visible, "
