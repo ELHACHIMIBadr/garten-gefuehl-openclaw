@@ -1,6 +1,13 @@
 """
-Distributeur Agent — Playwright Poster
-Selectors vérifiés live sur Pinterest DE (juillet 2026)
+Distributeur Agent — Playwright Poster v2 (Anti-Detection)
+
+4 améliorations anti-detection inspirées de Pinterest_Growth_Agent_core :
+  1. playwright-stealth  → patch webdriver/CDP fingerprint automatiquement
+  2. Profil Chrome persistant par compte (user_data_dir) → cookies + historique survivent
+  3. Session JSON fallback → si pas de profil, storage_state sauvegardé/rechargé
+  4. Timings humains → press_sequentially() + random delays partout, jamais fill() direct
+
+Sélecteurs vérifiés live sur Pinterest DE (juillet 2026)
 """
 
 import json
@@ -13,8 +20,39 @@ try:
 except ImportError:
     raise ImportError("pip install playwright && playwright install chromium")
 
+try:
+    from playwright_stealth import Stealth
+    STEALTH_AVAILABLE = True
+except ImportError:
+    STEALTH_AVAILABLE = False
+    print("[Playwright] ⚠️ playwright-stealth non installé — fonctionnement dégradé")
+    print("[Playwright]    → pip install playwright-stealth")
+
+# ── Répertoires ───────────────────────────────────────────────
+
 SESSIONS_DIR = Path("/root/garten-gefuehl-openclaw/data/pinterest_sessions")
+PROFILES_DIR = Path("/root/garten-gefuehl-openclaw/data/pinterest_profiles")
 SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
+PROFILES_DIR.mkdir(parents=True, exist_ok=True)
+
+# ── Constantes navigateur ─────────────────────────────────────
+
+USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/124.0.0.0 Safari/537.36"
+)
+
+LAUNCH_ARGS = [
+    "--no-sandbox",
+    "--disable-setuid-sandbox",
+    "--disable-blink-features=AutomationControlled",
+    "--disable-dev-shm-usage",
+    "--disable-gpu",
+    "--window-size=1280,900",
+]
+
+# ── Niche tags / hashtags ─────────────────────────────────────
 
 NICHE_TAGS = {
     "Blumen":        ["Blumen", "Gartenblumen", "Frühlingsgarten", "Pflanzen", "Blumengarten", "Blumenideen"],
@@ -43,85 +81,151 @@ def get_tags_for_niche(categorie):
     return NICHE_TAGS.get(categorie, ["Garten", "Gartenideen"])
 
 
-# ── Sessions ──────────────────────────────────────────────────
+# ── Helpers nom de compte ─────────────────────────────────────
 
-def _session_file(account_name):
-    slug = (account_name
-            .replace(" ", "_")
-            .replace("&", "und")
-            .replace("ü", "u")
-            .replace("Ü", "U"))
-    return SESSIONS_DIR / f"session_{slug}.json"
-
-
-def _save_cookies(account_name, context):
-    with open(_session_file(account_name), "w") as f:
-        json.dump(context.cookies(), f)
-    print(f"[Playwright] 🍪 Session sauvegardée — {account_name}")
+def _account_slug(account_name: str) -> str:
+    return (
+        account_name
+        .replace(" ", "_")
+        .replace("&", "und")
+        .replace("ü", "u")
+        .replace("Ü", "U")
+    )
 
 
-def _load_cookies(account_name, context):
-    p = _session_file(account_name)
-    if not p.exists():
-        return False
+# ── Profil Chrome persistant (amélioration #2) ────────────────
+
+def _profile_dir(account_name: str) -> Path:
+    """Répertoire Chrome persistant unique par compte."""
+    return PROFILES_DIR / _account_slug(account_name)
+
+
+# ── Session JSON fallback (amélioration #3) ───────────────────
+
+def _session_file(account_name: str) -> Path:
+    return SESSIONS_DIR / f"session_{_account_slug(account_name)}.json"
+
+
+def _save_session(account_name: str, context):
+    """Sauvegarde storage_state (cookies + localStorage) dans un fichier JSON."""
     try:
-        context.add_cookies(json.loads(p.read_text()))
-        print(f"[Playwright] 🍪 Session chargée — {account_name}")
-        return True
-    except Exception:
-        return False
+        sf = _session_file(account_name)
+        context.storage_state(path=str(sf))
+        print(f"[Playwright] 💾 Session sauvegardée — {account_name}")
+    except Exception as e:
+        print(f"[Playwright] ⚠️ Échec sauvegarde session: {e}")
 
 
-def _clear_session(account_name):
-    p = _session_file(account_name)
-    if p.exists():
-        p.unlink()
+def _clear_session(account_name: str):
+    sf = _session_file(account_name)
+    if sf.exists():
+        sf.unlink()
+        print(f"[Playwright] 🗑️ Session effacée — {account_name}")
 
+
+# ── Délais humains (amélioration #4) ─────────────────────────
 
 def _delay(a=500, b=1500):
+    """Délai aléatoire en millisecondes → secondes."""
     time.sleep(random.uniform(a / 1000, b / 1000))
+
+
+def _type_human(page, selector_or_elem, text: str, max_len: int = None):
+    """
+    Frappe humaine : clic → caractère par caractère avec délai aléatoire.
+    Equivalent de press_sequentially() de la lib de référence.
+    """
+    if max_len:
+        text = text[:max_len]
+    try:
+        if isinstance(selector_or_elem, str):
+            elem = page.wait_for_selector(selector_or_elem, timeout=8000)
+        else:
+            elem = selector_or_elem
+        elem.click()
+        _delay(300, 600)
+        for char in text:
+            elem.press(char)
+            time.sleep(random.uniform(0.03, 0.12))
+        _delay(300, 600)
+        return True
+    except Exception as e:
+        print(f"[Playwright] ⚠️ _type_human échec: {e}")
+        return False
+
+
+# ── Warm-up session (amélioration #1b) ───────────────────────
+
+def _warmup(page):
+    """
+    Navigation courte sur Pinterest avant de créer un pin.
+    Simule un comportement humain naturel.
+    """
+    try:
+        print("[Playwright] 🔥 Warm-up Pinterest...")
+        page.goto("https://de.pinterest.com/", timeout=20000)
+        page.wait_for_load_state("domcontentloaded", timeout=10000)
+        _delay(2000, 4000)
+
+        # Scroll léger pour simuler lecture du feed
+        page.evaluate("window.scrollTo(0, 400)")
+        _delay(1000, 2000)
+        page.evaluate("window.scrollTo(0, 800)")
+        _delay(800, 1500)
+        page.evaluate("window.scrollTo(0, 0)")
+        _delay(500, 1000)
+        print("[Playwright] ✅ Warm-up terminé")
+    except Exception as e:
+        print(f"[Playwright] ⚠️ Warm-up skippé: {e}")
 
 
 # ── Login ─────────────────────────────────────────────────────
 
-def _is_logged_in(page):
+def _is_logged_in(page) -> bool:
     try:
-        page.goto("https://www.pinterest.com/", timeout=15000)
+        page.goto("https://de.pinterest.com/me/", timeout=15000)
         page.wait_for_load_state("domcontentloaded", timeout=10000)
         _delay(1500, 2500)
-        return page.query_selector('[data-test-id="simple-login-button"]') is None
+        url = page.url
+        return "/login" not in url and "pinterest.com" in url
     except Exception:
         return False
 
 
-def _login(page, email, password):
+def _login(page, email: str, password: str) -> bool:
     print(f"[Playwright] 🔐 Login — {email[:25]}...")
     try:
-        page.goto("https://www.pinterest.com/login/", timeout=20000)
+        page.goto("https://de.pinterest.com/login/", timeout=20000)
         page.wait_for_load_state("domcontentloaded", timeout=10000)
         _delay(1500, 3000)
 
+        # Email — frappe humaine
         page.wait_for_selector('input[id="email"]', timeout=10000).click()
         _delay(300, 600)
-        page.fill('input[id="email"]', email)
+        for char in email:
+            page.press('input[id="email"]', char)
+            time.sleep(random.uniform(0.04, 0.12))
         _delay(500, 1000)
 
+        # Password — frappe humaine
         page.wait_for_selector('input[id="password"]', timeout=5000).click()
         _delay(300, 600)
-        page.fill('input[id="password"]', password)
+        for char in password:
+            page.press('input[id="password"]', char)
+            time.sleep(random.uniform(0.04, 0.12))
         _delay(800, 1500)
 
         with page.expect_navigation(timeout=15000, wait_until="domcontentloaded"):
             page.press('input[id="password"]', "Enter")
-        _delay(2000, 3000)
+        _delay(3000, 5000)
 
         url = page.url
         print(f"[Playwright] URL post-login : {url[:70]}")
         if "security" in url or "challenge" in url:
-            print("[Playwright] ⚠️ Challenge sécurité")
+            print("[Playwright] ⚠️ Challenge sécurité détecté")
             return False
         if "login" not in url and "pinterest.com" in url:
-            print("[Playwright] ✅ Login OK")
+            print("[Playwright] ✅ Login réussi")
             return True
         print("[Playwright] ⚠️ Login incertain")
         return True
@@ -164,28 +268,35 @@ def _wait_for_form_ready(page):
                 }""",
                 timeout=20000
             )
-            print("[Playwright] ✅ Formulaire prêt (fallback)")
+            print("[Playwright] ✅ Formulaire prêt (fallback board btn)")
             _delay(1000, 2000)
         except Exception:
             print("[Playwright] ⚠️ Formulaire pas confirmé — attente 6s")
             _delay(6000, 8000)
 
 
-# ── Remplissage champs ────────────────────────────────────────
+# ── Remplissage champs (tous en mode humain) ──────────────────
 
-def _fill_title(page, title):
+def _fill_title(page, title: str):
+    """Titre — frappe humaine caractère par caractère."""
     try:
         field = page.wait_for_selector('#storyboard-selector-title', timeout=8000)
         field.click()
         _delay(300, 500)
-        field.fill(title[:100])
+        # Vider le champ d'abord
+        field.triple_click()
+        _delay(200, 300)
+        for char in title[:100]:
+            field.press(char)
+            time.sleep(random.uniform(0.03, 0.10))
         _delay(400, 800)
         print("[Playwright] ✅ Titre rempli")
     except Exception as e:
         print(f"[Playwright] ⚠️ Titre skippé : {e}")
 
 
-def _fill_description(page, description):
+def _fill_description(page, description: str):
+    """Description — keyboard.type() avec délai par caractère."""
     try:
         container = page.wait_for_selector(
             '[data-test-id="storyboard-description-field-container"]',
@@ -199,21 +310,25 @@ def _fill_description(page, description):
         if editor:
             editor.click()
             _delay(300, 500)
-        page.keyboard.type(description[:500], delay=8)
+        # keyboard.type avec delay humain
+        page.keyboard.type(description[:500], delay=random.uniform(20, 50))
         _delay(400, 700)
         print("[Playwright] ✅ Description remplie")
     except Exception as e:
         print(f"[Playwright] ⚠️ Description skippée : {e}")
 
 
-def _fill_link(page, link):
+def _fill_link(page, link: str):
     if not link:
         return
     try:
         field = page.wait_for_selector('#WebsiteField', timeout=8000)
         field.click()
         _delay(300, 500)
-        field.fill(link)
+        # Frappe humaine pour le lien aussi
+        for char in link:
+            field.press(char)
+            time.sleep(random.uniform(0.02, 0.07))
         _delay(500, 1000)
         field.press("Tab")
         _delay(800, 1500)
@@ -222,7 +337,7 @@ def _fill_link(page, link):
         print(f"[Playwright] ⚠️ Lien skippé : {e}")
 
 
-def _fill_tags(page, tags):
+def _fill_tags(page, tags: list):
     try:
         field = page.query_selector('#combobox-storyboard-interest-tags')
         if not field:
@@ -234,7 +349,10 @@ def _fill_tags(page, tags):
         for tag in tags[:6]:
             field.click()
             _delay(200, 400)
-            field.fill(tag)
+            # Frappe humaine pour chaque tag
+            for char in tag:
+                field.press(char)
+                time.sleep(random.uniform(0.04, 0.10))
             _delay(700, 1100)
             try:
                 sug = page.wait_for_selector(
@@ -256,9 +374,8 @@ def _fill_tags(page, tags):
         print(f"[Playwright] ⚠️ Tags : {e}")
 
 
-def _select_board(page, board_name):
+def _select_board(page, board_name: str) -> bool:
     try:
-        # Attendre que le bouton soit cliquable
         page.wait_for_function(
             """() => {
                 const b = document.querySelector('[data-test-id="board-dropdown-select-button"]');
@@ -270,9 +387,8 @@ def _select_board(page, board_name):
         btn.click()
         _delay(2000, 3000)
 
-        # Selector confirmé live : data-test-id="boardWithoutSection"
+        # Sélecteur confirmé live
         options = page.query_selector_all('[data-test-id="boardWithoutSection"]')
-
         if options:
             for opt in options:
                 try:
@@ -284,7 +400,7 @@ def _select_board(page, board_name):
                         return True
                 except Exception:
                     continue
-            # Non trouvé → premier dispo
+            # Fallback → premier disponible
             try:
                 first_text = options[0].inner_text().strip()[:30]
                 options[0].click()
@@ -294,7 +410,7 @@ def _select_board(page, board_name):
             except Exception:
                 pass
 
-        # Fallback : data-test-id commençant par "board-row-"
+        # Fallback board-row-*
         options2 = page.query_selector_all('[data-test-id^="board-row-"]')
         if options2:
             for opt in options2:
@@ -313,7 +429,7 @@ def _select_board(page, board_name):
             print(f"[Playwright] ⚠️ Board fallback → '{first_text}'")
             return True
 
-        print(f"[Playwright] ❌ Aucune option board trouvée")
+        print("[Playwright] ❌ Aucune option board trouvée")
         return False
 
     except Exception as e:
@@ -321,7 +437,7 @@ def _select_board(page, board_name):
         return False
 
 
-def _publish(page):
+def _publish(page) -> bool:
     for sel in [
         '[data-test-id="storyboard-draft-footer-save-recommended-content"]',
         'button[data-test-id="board-dropdown-save-button"]',
@@ -345,7 +461,93 @@ def _publish(page):
         return False
 
 
-# ── Post pin ──────────────────────────────────────────────────
+# ── Lancement navigateur avec stealth + profil persistant ─────
+
+def _launch_browser_with_stealth(p, account_name: str, headless: bool):
+    """
+    Lance Chromium avec :
+    - playwright-stealth (amélioration #1)
+    - Profil Chrome persistant par compte (amélioration #2)
+
+    Retourne (context, page, used_persistent_profile)
+    """
+    profile_dir = _profile_dir(account_name)
+    session_file = _session_file(account_name)
+
+    # Tentative avec profil Chrome persistant
+    try:
+        profile_dir.mkdir(parents=True, exist_ok=True)
+
+        if STEALTH_AVAILABLE:
+            stealth = Stealth()
+            context = stealth.use_sync(p.chromium).launch_persistent_context(
+                user_data_dir=str(profile_dir),
+                headless=headless,
+                viewport={"width": 1280, "height": 900},
+                user_agent=USER_AGENT,
+                locale="de-DE",
+                args=LAUNCH_ARGS,
+            )
+        else:
+            context = p.chromium.launch_persistent_context(
+                user_data_dir=str(profile_dir),
+                headless=headless,
+                viewport={"width": 1280, "height": 900},
+                user_agent=USER_AGENT,
+                locale="de-DE",
+                args=LAUNCH_ARGS,
+            )
+
+        # Récupérer ou créer la page
+        page = context.pages[0] if context.pages else context.new_page()
+
+        # Script anti-détection supplémentaire
+        context.add_init_script("""
+            Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+            window.chrome = {runtime: {}};
+            Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3]});
+        """)
+
+        print(f"[Playwright] 🗂️ Profil Chrome persistant : {profile_dir.name}")
+        return context, page, True
+
+    except Exception as e:
+        print(f"[Playwright] ⚠️ Profil persistant échoué ({e}) — fallback session JSON")
+
+    # Fallback : browser classique + session JSON
+    if STEALTH_AVAILABLE:
+        stealth = Stealth()
+        browser = stealth.use_sync(p.chromium).launch(
+            headless=headless,
+            args=LAUNCH_ARGS,
+        )
+    else:
+        browser = p.chromium.launch(headless=headless, args=LAUNCH_ARGS)
+
+    # Charger session JSON si disponible
+    storage = str(session_file) if session_file.exists() else None
+    context = browser.new_context(
+        storage_state=storage,
+        viewport={"width": 1280, "height": 900},
+        user_agent=USER_AGENT,
+        locale="de-DE",
+    )
+    context.add_init_script("""
+        Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+        window.chrome = {runtime: {}};
+        Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3]});
+    """)
+    page = context.new_page()
+
+    if storage:
+        print(f"[Playwright] 🍪 Session JSON chargée — {account_name}")
+    else:
+        print(f"[Playwright] 🆕 Nouveau contexte — {account_name}")
+
+    return context, page, False
+
+
+# ── Post pin principal ────────────────────────────────────────
 
 def post_pin(account_name, email, password, image_path, title,
              description, board_name, categorie, link=None, headless=True):
@@ -353,49 +555,33 @@ def post_pin(account_name, email, password, image_path, title,
     result = {"success": False, "pin_url": None, "error": None}
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(
-            headless=headless,
-            args=[
-                "--no-sandbox",
-                "--disable-setuid-sandbox",
-                "--disable-blink-features=AutomationControlled",
-                "--disable-dev-shm-usage",
-                "--disable-gpu",
-                "--window-size=1280,900",
-            ]
-        )
-        context = browser.new_context(
-            viewport={"width": 1280, "height": 900},
-            user_agent=(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/124.0.0.0 Safari/537.36"
-            ),
-            locale="de-DE",
-        )
-        context.add_init_script("""
-            Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
-            window.chrome = {runtime: {}};
-        """)
-        page = context.new_page()
+        context, page, used_persistent = _launch_browser_with_stealth(p, account_name, headless)
 
         try:
-            # 1. Session
-            logged_in = _load_cookies(account_name, context) and _is_logged_in(page)
-            if not logged_in:
-                _clear_session(account_name)
+            # 1. Vérifier session / login
+            if _is_logged_in(page):
+                print(f"[Playwright] ✅ Déjà connecté — {account_name}")
+            else:
+                print(f"[Playwright] 🔐 Session expirée — re-login")
+                if not used_persistent:
+                    _clear_session(account_name)
                 if not _login(page, email, password):
                     result["error"] = "Login échoué"
                     return result
-                _save_cookies(account_name, context)
+                # Sauvegarder session après login réussi
+                if not used_persistent:
+                    _save_session(account_name, context)
 
-            # 2. Pin creation tool
+            # 2. Warm-up (amélioration #1b)
+            _warmup(page)
+
+            # 3. Ouvrir pin-creation-tool
             print("[Playwright] 🎨 Ouverture pin-creation-tool...")
             page.goto("https://de.pinterest.com/pin-creation-tool/", timeout=30000)
             page.wait_for_load_state("domcontentloaded", timeout=15000)
             _delay(3000, 5000)
 
-            # 3. Upload image
+            # 4. Upload image
             print(f"[Playwright] 📤 Upload : {Path(image_path).name}")
             file_input = page.wait_for_selector(
                 'input[data-test-id="storyboard-upload-input"], input[type="file"]',
@@ -403,32 +589,26 @@ def post_pin(account_name, email, password, image_path, title,
             )
             file_input.set_input_files(image_path)
 
-            # 4. Attendre formulaire prêt
+            # 5. Attendre formulaire prêt
             _wait_for_form_ready(page)
 
-            # 5. Titre
+            # 6. Remplir champs (tous en mode humain)
             _fill_title(page, title)
-
-            # 6. Description
             _fill_description(page, description)
-
-            # 7. Lien
             _fill_link(page, link)
-
-            # 8. Tags
             _fill_tags(page, get_tags_for_niche(categorie))
 
-            # 9. Board
+            # 7. Sélectionner board
             if not _select_board(page, board_name):
                 result["error"] = f"Board '{board_name}' introuvable"
                 return result
 
-            # 10. Publier
+            # 8. Publier
             if not _publish(page):
                 result["error"] = "Bouton publier non trouvé"
                 return result
 
-            # 11. Vérifier succès
+            # 9. Vérifier succès
             url = page.url
             if "pin/" in url and "creation-tool" not in url:
                 result["success"] = True
@@ -443,14 +623,18 @@ def post_pin(account_name, email, password, image_path, title,
                         timeout=5000
                     )
                     result["success"] = True
-                    print("[Playwright] ✅ Pin publié (confirmation)")
+                    print("[Playwright] ✅ Pin publié (confirmation toast)")
                 except Exception:
                     err = page.query_selector('[data-test-id="error-message"]')
                     if err:
                         result["error"] = f"Erreur Pinterest: {err.inner_text()[:100]}"
                     else:
                         result["success"] = True
-                        print("[Playwright] ✅ Pin publié (pas d'erreur)")
+                        print("[Playwright] ✅ Pin publié (pas d'erreur visible)")
+
+            # 10. Sauvegarder session après succès
+            if result["success"] and not used_persistent:
+                _save_session(account_name, context)
 
         except PWTimeoutError as e:
             result["error"] = f"Timeout: {str(e)[:100]}"
@@ -461,7 +645,6 @@ def post_pin(account_name, email, password, image_path, title,
         finally:
             try:
                 context.close()
-                browser.close()
             except Exception:
                 pass
 
@@ -476,7 +659,7 @@ def post_pin_with_retry(account_name, email, password, image_path, title,
     for attempt in range(1, max_retries + 1):
         print(f"[Playwright] Tentative {attempt}/{max_retries} — {account_name}")
         if attempt == 2:
-            print("[Playwright] 🔄 Re-login forcé")
+            print("[Playwright] 🔄 Effacement session — re-login forcé")
             _clear_session(account_name)
 
         result = post_pin(
@@ -487,7 +670,7 @@ def post_pin_with_retry(account_name, email, password, image_path, title,
             return result
 
         if attempt < max_retries:
-            wait = random.randint(30, 60)
+            wait = random.randint(45, 90)
             print(f"[Playwright] ⏳ Retry dans {wait}s ({result.get('error', '?')})")
             time.sleep(wait)
 
