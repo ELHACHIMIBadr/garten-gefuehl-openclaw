@@ -1,5 +1,10 @@
 """
 Distributeur Agent — State Manager (Playwright)
+
+CHANGELOG v2 (Fix permanent déduplication pins):
+- posted_pins stocke désormais "YYYY-MM-DD::filename" au lieu de juste "filename"
+- is_pin_already_posted vérifie uniquement les pins de la même date
+- Migration automatique des anciens formats (filename seul → ignorés)
 """
 
 import json
@@ -58,19 +63,32 @@ def get_next_board_name(account_name: str, boards: list, state: dict) -> str:
 
 # ── Déduplication pins ───────────────────────────────────────
 
+def _pin_key(pin_filename: str, for_date: str = None) -> str:
+    """Clé unique : YYYY-MM-DD::filename"""
+    d = for_date or date.today().isoformat()
+    return f"{d}::{pin_filename}"
+
+
 def is_pin_already_posted(pin_filename: str, account_name: str, state: dict) -> bool:
+    """Vérifie uniquement les pins de la date du jour."""
     acc = state["accounts"].get(account_name, {})
-    return pin_filename in acc.get("posted_pins", [])
+    today_key = _pin_key(pin_filename)
+    return today_key in acc.get("posted_pins", [])
 
 
 def mark_pin_as_posted(pin_filename: str, account_name: str, state: dict):
+    """Enregistre le pin avec sa date pour éviter les collisions inter-jours."""
     acc = state["accounts"].setdefault(account_name, {
         "posted_pins": [], "board_index": 0, "total_posted": 0
     })
     posted = acc.setdefault("posted_pins", [])
-    if pin_filename not in posted:
-        posted.append(pin_filename)
+    key = _pin_key(pin_filename)
+    if key not in posted:
+        posted.append(key)
         acc["total_posted"] = acc.get("total_posted", 0) + 1
+    # Garder max 60 jours d'historique (5 pins/jour × 60 = 300 entrées max)
+    if len(posted) > 300:
+        posted[:] = posted[-300:]
 
 
 # ── Tracking URLs journalier ─────────────────────────────────
