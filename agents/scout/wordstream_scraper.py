@@ -1,10 +1,13 @@
 """
 WordStream Scraper — Volumes SEO via Playwright
 
-Navigue vers wordstream.com/keywords, tape le keyword,
-scrape les 25 résultats avec volume + CPC + compétition pour DE.
-
-Utilisé par le Scout comme source de volumes réels.
+CHANGELOG v2:
+- Sélecteurs corrigés d'après le vrai HTML de wordstream.com/keywords
+  Input: id="input_1_1" (Gravity Forms)
+  Soumission via bouton id="gform_submit_button_1"
+  Résultats : attente AJAX après soumission
+- Sélection pays via input_1_9 (2ème champ texte)
+- Dump HTML post-soumission pour debug si 0 résultats
 """
 
 import time
@@ -22,13 +25,6 @@ def _delay(a=800, b=2000):
 
 
 def get_wordstream_volumes(keyword: str, country: str = "DE") -> list:
-    """
-    Scrape WordStream Free Keyword Tool pour un keyword.
-
-    Returns:
-        list of dicts: [{"keyword": str, "volume": int, "cpc": float, "competition": str}]
-        Liste vide si erreur ou pas de résultats.
-    """
     if not PLAYWRIGHT_AVAILABLE:
         print("[WordStream] Playwright non disponible")
         return []
@@ -49,10 +45,9 @@ def get_wordstream_volumes(keyword: str, country: str = "DE") -> list:
             ),
             locale="de-DE",
         )
-        context.add_init_script("""
-            Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
-        """)
-
+        context.add_init_script(
+            "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
+        )
         page = context.new_page()
 
         try:
@@ -61,71 +56,99 @@ def get_wordstream_volumes(keyword: str, country: str = "DE") -> list:
             page.wait_for_load_state("domcontentloaded", timeout=15000)
             _delay(2000, 3000)
 
-            # Fermer cookie banner si présent
+            # Remplir le keyword — id="input_1_1"
+            kw_input = page.wait_for_selector('#input_1_1', timeout=10000)
+            kw_input.click()
+            _delay(300, 500)
+            kw_input.fill(keyword)
+            _delay(500, 800)
+
+            # Sélectionner le pays si possible (2ème input texte = industry/country)
             try:
-                accept_btn = page.query_selector('[id*="accept"], [class*="accept"], button:has-text("Accept")')
-                if accept_btn:
-                    accept_btn.click()
-                    _delay(500, 1000)
+                country_input = page.query_selector('#input_1_9')
+                if country_input:
+                    country_input.fill(country)
+                    _delay(300, 500)
             except Exception:
                 pass
 
-            # Remplir le champ keyword
-            keyword_input = page.wait_for_selector(
-                'input[name="q"], input[placeholder*="keyword"], input[type="text"]',
-                timeout=10000
-            )
-            keyword_input.click()
-            _delay(300, 600)
-            keyword_input.fill(keyword)
-            _delay(500, 1000)
+            # Soumettre via le bouton Gravity Forms
+            submit_btn = page.query_selector('#gform_submit_button_1')
+            if submit_btn:
+                submit_btn.click()
+            else:
+                kw_input.press("Enter")
 
-            # Sélectionner le pays si possible
-            try:
-                country_select = page.query_selector('select[name="country"], select[id*="country"]')
-                if country_select:
-                    country_select.select_option(value="DE")
-                    _delay(300, 600)
-            except Exception:
-                pass
+            _delay(4000, 6000)
 
-            # Soumettre
-            keyword_input.press("Enter")
-            _delay(3000, 5000)
-
-            # Attendre les résultats
+            # Attendre les résultats AJAX
             try:
                 page.wait_for_selector(
-                    'table, [class*="keyword-result"], [class*="result-table"]',
-                    timeout=15000
+                    'table, [class*="keyword"], [class*="result"], [id*="result"]',
+                    timeout=20000
                 )
+                _delay(2000, 3000)
             except Exception:
-                print("[WordStream] ⚠️ Pas de tableau de résultats trouvé")
+                print("[WordStream] ⚠️ Aucun résultat détecté après soumission")
+                # Debug : dump HTML post-soumission
+                html = page.content()
+                print(f"[WordStream] HTML post-soumission[:1000]: {html[:1000]}")
                 return []
 
-            _delay(1000, 2000)
-
-            # Extraire les données
+            # Extraire les données du tableau
             data = page.evaluate("""
                 () => {
                     const results = [];
-                    // Chercher les lignes du tableau
-                    const rows = document.querySelectorAll('table tbody tr, [class*="keyword-row"], [class*="result-row"]');
-                    rows.forEach(row => {
-                        const cells = row.querySelectorAll('td, [class*="cell"]');
-                        if (cells.length >= 2) {
-                            const kw = cells[0] ? cells[0].innerText.trim() : '';
-                            const vol = cells[1] ? cells[1].innerText.trim() : '0';
-                            const comp = cells[2] ? cells[2].innerText.trim() : '';
-                            const cpc = cells[3] ? cells[3].innerText.trim() : '0';
-                            if (kw && kw.length > 1) {
-                                results.push({keyword: kw, volume_raw: vol, competition: comp, cpc_raw: cpc});
+
+                    // Chercher tous les tableaux
+                    const tables = document.querySelectorAll('table');
+                    tables.forEach(table => {
+                        const rows = table.querySelectorAll('tbody tr');
+                        rows.forEach(row => {
+                            const cells = row.querySelectorAll('td');
+                            if (cells.length >= 2) {
+                                const kw = cells[0] ? cells[0].innerText.trim() : '';
+                                const vol = cells[1] ? cells[1].innerText.trim() : '0';
+                                const comp = cells[2] ? cells[2].innerText.trim() : '';
+                                const cpc = cells[3] ? cells[3].innerText.trim() : '0';
+                                if (kw && kw.length > 1) {
+                                    results.push({
+                                        keyword: kw,
+                                        volume_raw: vol,
+                                        competition: comp,
+                                        cpc_raw: cpc
+                                    });
+                                }
                             }
-                        }
+                        });
                     });
+
+                    // Fallback : chercher par classes keyword
+                    if (results.length === 0) {
+                        const items = document.querySelectorAll(
+                            '[class*="keyword-row"], [class*="result-row"], [class*="kw-row"]'
+                        );
+                        items.forEach(item => {
+                            const cells = item.querySelectorAll('[class*="cell"], td, span');
+                            if (cells.length >= 2) {
+                                results.push({
+                                    keyword: cells[0].innerText.trim(),
+                                    volume_raw: cells[1] ? cells[1].innerText.trim() : '0',
+                                    competition: cells[2] ? cells[2].innerText.trim() : '',
+                                    cpc_raw: cells[3] ? cells[3].innerText.trim() : '0'
+                                });
+                            }
+                        });
+                    }
+
                     return results;
                 }
             """)
+
+            # Si toujours 0, dump le HTML pour debug
+            if not data:
+                html = page.content()
+                print(f"[WordStream] HTML résultats[:2000]: {html[2000:4000]}")
 
             # Parser les valeurs
             for item in data[:25]:
@@ -175,17 +198,9 @@ def get_wordstream_volumes(keyword: str, country: str = "DE") -> list:
 
 
 def get_volumes_for_keywords(keywords: list, country: str = "DE") -> dict:
-    """
-    Récupère les volumes pour une liste de keywords.
-    On cherche le keyword principal et on mappe les résultats.
-
-    Returns:
-        dict: {keyword_lower: {"volume": int, "cpc": float, "competition": str, ...}}
-    """
     if not keywords:
         return {}
 
-    # Utiliser le premier keyword comme seed
     seed = keywords[0]
     ws_results = get_wordstream_volumes(seed, country)
 
@@ -197,10 +212,9 @@ def get_volumes_for_keywords(keywords: list, country: str = "DE") -> dict:
             "cpc": item["cpc"],
             "competition": item["competition"],
             "competition_level": item["competition"],
-            "trend": 10,  # WordStream ne donne pas les trends
+            "trend": 10,
         }
 
-    # Ajouter les keywords demandés non trouvés avec volume minimal
     for kw in keywords:
         kw_lower = kw.lower().strip()
         if kw_lower not in volumes:
