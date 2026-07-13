@@ -1,10 +1,10 @@
 """
 WordStream Scraper — Volumes SEO via Playwright
 
-CHANGELOG v3:
-- Fix OneTrust cookie banner : suppression JS avant tout clic
-- Sélecteurs confirmés : input#input_1_1, button#gform_submit_button_1
-- Debug HTML si 0 résultats
+CHANGELOG v4:
+- Fix navigation : soumission redirige vers tools.wordstream.com/fkt
+- Attente navigation complète avant scraping
+- Table confirmée présente sur la page résultats
 """
 
 import time
@@ -21,42 +21,17 @@ def _delay(a=800, b=2000):
     time.sleep(random.uniform(a / 1000, b / 1000))
 
 
-def _dismiss_cookie_banner(page):
-    """Supprime le overlay OneTrust qui bloque les clics."""
-    try:
-        # Essayer le bouton Accept d'abord
-        for sel in [
-            '#onetrust-accept-btn-handler',
-            'button:has-text("Accept All")',
-            'button:has-text("Accept Cookies")',
-            '.onetrust-accept-btn-handler',
-        ]:
-            try:
-                btn = page.query_selector(sel)
-                if btn and btn.is_visible():
-                    btn.click(force=True)
-                    _delay(800, 1200)
-                    print("[WordStream] 🍪 Cookie banner accepté")
-                    return
-            except Exception:
-                continue
-    except Exception:
-        pass
-
-    # Fallback : supprimer l'overlay via JS
+def _dismiss_onetrust(page):
     try:
         page.evaluate("""
             () => {
-                const ids = ['onetrust-consent-sdk', 'onetrust-banner-sdk', 'onetrust-pc-sdk'];
-                ids.forEach(id => { const el = document.getElementById(id); if (el) el.remove(); });
-                document.querySelectorAll('.onetrust-pc-dark-filter, .onetrust-overlay').forEach(el => el.remove());
+                document.querySelectorAll('[id*=onetrust], .onetrust-pc-dark-filter').forEach(el => el.remove());
                 document.body.style.overflow = 'auto';
             }
         """)
         _delay(300, 500)
-        print("[WordStream] 🍪 Cookie banner supprimé (JS)")
-    except Exception as e:
-        print(f"[WordStream] ⚠️ Cookie banner non supprimé: {e}")
+    except Exception:
+        pass
 
 
 def get_wordstream_volumes(keyword: str, country: str = "DE") -> list:
@@ -80,89 +55,59 @@ def get_wordstream_volumes(keyword: str, country: str = "DE") -> list:
             ),
             locale="de-DE",
         )
-        context.add_init_script(
-            "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
-        )
         page = context.new_page()
 
         try:
-            print(f"[WordStream] Recherche volumes pour : '{keyword}'")
+            print(f"[WordStream] Recherche : '{keyword}'")
             page.goto("https://www.wordstream.com/keywords", timeout=30000)
             page.wait_for_load_state("domcontentloaded", timeout=15000)
             _delay(2000, 3000)
 
-            # Supprimer cookie banner OneTrust
-            _dismiss_cookie_banner(page)
+            # Supprimer OneTrust
+            _dismiss_onetrust(page)
 
-            # Remplir le keyword — id="input_1_1"
-            kw_input = page.wait_for_selector('#input_1_1', timeout=10000)
-            kw_input.click(force=True)
-            _delay(300, 500)
-            kw_input.fill(keyword)
+            # Remplir keyword
+            page.fill('#input_1_1', keyword)
             _delay(500, 800)
 
-            # Soumettre via le bouton Gravity Forms
-            submit_btn = page.query_selector('#gform_submit_button_1')
-            if submit_btn:
-                submit_btn.click(force=True)
-            else:
-                kw_input.press("Enter")
+            # Soumettre et attendre la navigation vers tools.wordstream.com/fkt
+            with page.expect_navigation(timeout=20000, wait_until="domcontentloaded"):
+                page.click('#gform_submit_button_1', force=True)
 
-            _delay(4000, 6000)
+            _delay(3000, 5000)
+            print(f"[WordStream] URL résultats : {page.url[:80]}")
 
-            # Attendre les résultats AJAX
+            # Attendre que la table soit rendue par React
             try:
-                page.wait_for_selector(
-                    'table, [class*="keyword"], [class*="result"], [id*="result"]',
-                    timeout=20000
-                )
-                _delay(2000, 3000)
+                page.wait_for_selector('table tbody tr', timeout=15000)
+                _delay(1000, 2000)
             except Exception:
-                print("[WordStream] ⚠️ Aucun résultat détecté après soumission")
-                html = page.content()
-                print(f"[WordStream] HTML post-soumission[2000:4000]: {html[2000:4000]}")
+                print("[WordStream] ⚠️ Table non trouvée — body text:")
+                print(page.inner_text('body')[:500])
                 return []
 
-            # Extraire les données du tableau
+            # Scraper la table
             data = page.evaluate("""
                 () => {
                     const results = [];
-                    const tables = document.querySelectorAll('table');
-                    tables.forEach(table => {
-                        const rows = table.querySelectorAll('tbody tr');
-                        rows.forEach(row => {
-                            const cells = row.querySelectorAll('td');
-                            if (cells.length >= 2) {
-                                const kw = cells[0] ? cells[0].innerText.trim() : '';
-                                const vol = cells[1] ? cells[1].innerText.trim() : '0';
-                                const comp = cells[2] ? cells[2].innerText.trim() : '';
-                                const cpc = cells[3] ? cells[3].innerText.trim() : '0';
-                                if (kw && kw.length > 1) {
-                                    results.push({keyword: kw, volume_raw: vol, competition: comp, cpc_raw: cpc});
-                                }
+                    const rows = document.querySelectorAll('table tbody tr');
+                    rows.forEach(row => {
+                        const cells = row.querySelectorAll('td');
+                        if (cells.length >= 2) {
+                            const kw = cells[0] ? cells[0].innerText.trim() : '';
+                            const vol = cells[1] ? cells[1].innerText.trim() : '0';
+                            const comp = cells[2] ? cells[2].innerText.trim() : '';
+                            const cpc = cells[3] ? cells[3].innerText.trim() : '0';
+                            if (kw && kw.length > 1) {
+                                results.push({keyword: kw, volume_raw: vol, competition: comp, cpc_raw: cpc});
                             }
-                        });
+                        }
                     });
-                    if (results.length === 0) {
-                        document.querySelectorAll('[class*="keyword-row"], [class*="result-row"]').forEach(item => {
-                            const cells = item.querySelectorAll('[class*="cell"], td, span');
-                            if (cells.length >= 2) {
-                                results.push({
-                                    keyword: cells[0].innerText.trim(),
-                                    volume_raw: cells[1] ? cells[1].innerText.trim() : '0',
-                                    competition: cells[2] ? cells[2].innerText.trim() : '',
-                                    cpc_raw: cells[3] ? cells[3].innerText.trim() : '0'
-                                });
-                            }
-                        });
-                    }
                     return results;
                 }
             """)
 
-            if not data:
-                html = page.content()
-                print(f"[WordStream] HTML résultats[2000:4000]: {html[2000:4000]}")
+            print(f"[WordStream] {len(data)} lignes trouvées dans le tableau")
 
             for item in data[:25]:
                 try:
@@ -174,9 +119,9 @@ def get_wordstream_volumes(keyword: str, country: str = "DE") -> list:
                     except Exception:
                         cpc = 0.0
                     comp = item.get("competition", "").upper()
-                    competition = "HIGH" if "HIGH" in comp or "HOCH" in comp else ("LOW" if "LOW" in comp or "NIEDRIG" in comp else "MEDIUM")
+                    competition = "HIGH" if "HIGH" in comp else ("LOW" if "LOW" in comp else "MEDIUM")
                     kw = item.get("keyword", "").lower().strip()
-                    if kw and volume >= 0:
+                    if kw:
                         results.append({"keyword": kw, "volume": volume, "cpc": cpc, "competition": competition})
                 except Exception:
                     continue
@@ -184,7 +129,7 @@ def get_wordstream_volumes(keyword: str, country: str = "DE") -> list:
             print(f"[WordStream] ✅ {len(results)} keywords récupérés")
 
         except PWTimeoutError as e:
-            print(f"[WordStream] ❌ Timeout : {e}")
+            print(f"[WordStream] ❌ Timeout : {str(e)[:100]}")
         except Exception as e:
             print(f"[WordStream] ❌ Erreur : {e}")
         finally:
