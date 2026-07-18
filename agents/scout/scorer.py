@@ -74,7 +74,12 @@ def filter_keywords(keywords_data: dict, volumes_data: dict, history: dict) -> L
 
     for kw_lower, kw_info in keywords_data.items():
         volume_info = volumes_data.get(kw_lower, {})
-        volume = volume_info.get("volume", 0)
+
+        # Cast défensif — les sources peuvent retourner des strings
+        try:
+            volume = float(volume_info.get("volume", 0) or 0)
+        except (TypeError, ValueError):
+            volume = 0
 
         if volume < 50:
             continue
@@ -115,13 +120,23 @@ def score_keywords(keywords: List[dict]) -> List[dict]:
     ]
 
     for kw in keywords:
-        volume = int(kw["volume"] or 0)
-        cpc = max(float(kw["cpc"] or 0), 0.01)
-        competition = max(_normalize_competition(kw["competition"]), 0.01)
+        try:
+            volume = int(float(kw.get("volume", 0) or 0))
+        except (TypeError, ValueError):
+            volume = 0
+        try:
+            cpc = max(float(kw.get("cpc", 0) or 0), 0.01)
+        except (TypeError, ValueError):
+            cpc = 0.01
+        competition = max(_normalize_competition(kw.get("competition", 0)), 0.01)
 
         base_score = (volume * cpc * SCORING["cpc_weight"]) / (competition * SCORING["competition_penalty"])
 
-        if float(kw.get("trend", 0) or 0) > 0:
+        try:
+            trend_val = float(kw.get("trend", 0) or 0)
+        except (TypeError, ValueError):
+            trend_val = 0
+        if trend_val > 0:
             base_score *= (1 + SCORING["trend_bonus"])
 
         sources = kw.get("sources", [])

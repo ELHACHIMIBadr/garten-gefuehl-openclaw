@@ -346,7 +346,7 @@ def _draw_text_with_shadow(draw, position, text, font, fill, shadow_color=(0, 0,
     draw.text((x, y), text, font=font, fill=fill)
 
 
-def add_text_overlay(image_path: str, text: str, site_url: str = "garten-gefühl.de") -> bool:
+def add_text_overlay(image_path: str, text: str, site_url: str = "") -> bool:
     if not PIL_AVAILABLE:
         return True
     try:
@@ -389,8 +389,7 @@ def add_text_overlay(image_path: str, text: str, site_url: str = "garten-gefühl
         for i, line in enumerate(lines):
             _draw_text_with_shadow(draw, (int(w * 0.06), y_start + i * line_height),
                                    line, font=font_main, fill=(255, 255, 255))
-        _draw_text_with_shadow(draw, (int(w * 0.06), h - int(h * 0.05)),
-                               site_url, font=font_url, fill=(220, 220, 220), shadow_offset=1)
+        # URL watermark supprimé — Pinterest pénalise les URLs sur l'image
         img.save(image_path, format="WEBP", quality=88)
         return True
     except Exception as e:

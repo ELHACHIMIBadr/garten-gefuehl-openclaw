@@ -94,6 +94,25 @@ def get_published_articles(categorie: str) -> list:
     return found
 
 
+def _load_pin_titles_for_date(date_str: str) -> dict:
+    """Charge les titres des pins depuis les article JSON d'une date."""
+    mapping = {}
+    article_dir = Path(ARTICLES_DIR) / date_str
+    if not article_dir.exists():
+        return mapping
+    for f in article_dir.glob("article_*.json"):
+        try:
+            data = json.load(open(f, encoding="utf-8"))
+            for pin in data.get("pins", []):
+                pin_path = pin.get("path", "")
+                title = pin.get("title", "")
+                if pin_path and title:
+                    mapping[Path(pin_path).name] = title
+        except Exception:
+            continue
+    return mapping
+
+
 def get_pins_for_account(account_name: str, state: dict) -> list:
     """Retourne les pins non encore postés pour ce compte, triés par date desc."""
     pins_root = Path(PINS_DIR)
@@ -109,6 +128,7 @@ def get_pins_for_account(account_name: str, state: dict) -> list:
     for date_dir in sorted(pins_root.iterdir(), reverse=True):
         if not date_dir.is_dir():
             continue
+        pin_titles = _load_pin_titles_for_date(date_dir.name)
         for pin_file in sorted(date_dir.glob(f"pin_*_{account_slug}*.webp")):
             filename = pin_file.name
             if is_pin_already_posted(filename, account_name, state):
@@ -117,6 +137,7 @@ def get_pins_for_account(account_name: str, state: dict) -> list:
                 "path": str(pin_file),
                 "filename": filename,
                 "date": date_dir.name,
+                "title": pin_titles.get(filename, ""),
             })
     return available
 
@@ -201,11 +222,13 @@ def build_daily_plan(state: dict) -> dict:
                 break
             pin = pins_available[pin_cursor]; pin_cursor += 1
             board = get_next_board_name(account_name, cfg["boards"], state)
+            # Titre = overlay texte du pin (unique) ou fallback keyword
+            pin_title = pin.get("title", "") or f"{categorie} Tipps & Ideen"
             slots.append({
                 "pin_path": pin["path"],
                 "pin_filename": pin["filename"],
                 "link": None,
-                "title": f"Garten Inspiration – {categorie}",
+                "title": pin_title,
                 "board": board,
                 "posted": False,
             })
