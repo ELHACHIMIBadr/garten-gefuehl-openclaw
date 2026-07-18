@@ -45,8 +45,9 @@ def get_keyword_volumes(keywords: list) -> dict:
     # Dédupliquer et limiter
     unique_kws = list(dict.fromkeys(kw.strip() for kw in keywords if kw.strip()))
 
-    # Plan gratuit : max ~200 keywords par requête (700 = plans payants)
-    batch_size = 200
+    # Plan gratuit : limite stricte sur le nombre de keywords/requête
+    # On envoie les 50 premiers (suffisant pour le scoring)
+    batch_size = 50
     unique_kws = unique_kws[:batch_size]
 
     print(f"[Mangools] Requête keyword-imports : {len(unique_kws)} keywords | DE/de")
