@@ -42,9 +42,12 @@ def get_keyword_volumes(keywords: list) -> dict:
 
     api_key = _get_api_key()
     
-    # Dédupliquer et limiter à 700
+    # Dédupliquer et limiter
     unique_kws = list(dict.fromkeys(kw.strip() for kw in keywords if kw.strip()))
-    unique_kws = unique_kws[:MAX_KEYWORDS_PER_REQUEST]
+
+    # Plan gratuit : max ~200 keywords par requête (700 = plans payants)
+    batch_size = 200
+    unique_kws = unique_kws[:batch_size]
 
     print(f"[Mangools] Requête keyword-imports : {len(unique_kws)} keywords | DE/de")
 
@@ -125,15 +128,20 @@ def get_keyword_volumes(keywords: list) -> dict:
             # Trend : calculé depuis msv (monthly search volumes)
             trend = 0
             msv = kw_data.get("msv", [])
-            if msv and len(msv) >= 6:
-                # msv format: [year, month, volume, year, month, volume, ...]
-                # Extraire les volumes (chaque 3ème élément)
-                volumes = [msv[i] for i in range(2, len(msv), 3) if i < len(msv)]
-                if len(volumes) >= 4:
-                    recent = sum(volumes[:3]) / 3 if volumes[:3] else 0
-                    older = sum(volumes[-3:]) / 3 if volumes[-3:] else 0
-                    if older > 0:
-                        trend = round(((recent - older) / older) * 100, 1)
+            if msv and isinstance(msv, list) and len(msv) >= 6:
+                try:
+                    # msv peut être flat [year,month,vol,...] ou nested [[year,month,vol],...]
+                    if isinstance(msv[0], list):
+                        volumes = [entry[2] for entry in msv if isinstance(entry, list) and len(entry) >= 3]
+                    else:
+                        volumes = [msv[i] for i in range(2, len(msv), 3) if i < len(msv) and isinstance(msv[i], (int, float))]
+                    if len(volumes) >= 4:
+                        recent = sum(volumes[:3]) / 3
+                        older = sum(volumes[-3:]) / 3
+                        if older > 0:
+                            trend = round(((recent - older) / older) * 100, 1)
+                except Exception:
+                    trend = 0
 
             results[kw_text] = {
                 "volume": sv,
