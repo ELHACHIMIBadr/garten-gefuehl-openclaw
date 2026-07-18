@@ -41,7 +41,14 @@ try:
 except ImportError:
     SLUGS_DB_AVAILABLE = False
 
-# WordStream scraper pour volumes réels
+# Mangools KWFinder API pour volumes réels
+try:
+    from mangools_client import get_keyword_volumes as mangools_get_volumes, check_remaining_lookups
+    MANGOOLS_AVAILABLE = True
+except ImportError:
+    MANGOOLS_AVAILABLE = False
+
+# WordStream scraper (legacy, fallback)
 try:
     from wordstream_scraper import get_volumes_for_keywords
     WORDSTREAM_AVAILABLE = True
@@ -268,22 +275,23 @@ def run(category_override: int = None, dry_run: bool = False, slot: int = 0):
         print(f"\n[Scout] ÉTAPE 3 — Historique...")
         history = load_history()
 
-        # ÉTAPE 4 — Volumes
+        # ÉTAPE 4 — Volumes (Mangools API > synthétique)
         print(f"\n[Scout] ÉTAPE 4 — Volumes SEO...")
         volumes_data = {}
 
-        # Essayer WordStream (Playwright)
-        if WORDSTREAM_AVAILABLE:
+        # Source 1 : Mangools KWFinder API (volumes Google exacts)
+        if MANGOOLS_AVAILABLE:
             try:
-                keyword_list = [kw_info.get("original", kw) for kw, kw_info in list(keywords_data.items())[:5]]
-                volumes_data = get_volumes_for_keywords(keyword_list)
-                print(f"[Scout] ✅ WordStream — {len(volumes_data)} volumes récupérés")
+                keyword_list = list(keywords_data.keys())
+                volumes_data = mangools_get_volumes(keyword_list)
+                print(f"[Scout] ✅ Mangools — {len(volumes_data)} volumes récupérés")
             except Exception as e:
-                print(f"[Scout] ⚠️ WordStream erreur: {e} — fallback synthétique")
+                print(f"[Scout] ⚠️ Mangools erreur: {e} — fallback synthétique")
                 volumes_data = {}
 
+        # Fallback : volumes synthétiques
         if not volumes_data:
-            print(f"[Scout] ℹ️ Volumes synthétiques (WordStream indisponible)")
+            print(f"[Scout] ℹ️ Volumes synthétiques (Mangools indisponible)")
             volumes_data = build_synthetic_volumes(keywords_data)
 
         # ÉTAPE 5 — Filtrage + scoring
